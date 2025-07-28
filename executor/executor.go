@@ -21,17 +21,30 @@ type Engine[C any] struct {
 	nodeStat   map[string]*nodeStat
 	nodeExec   map[string]func(context.Context, C) error
 
-	opt *option
+	opt        *option
+	workerPool WorkerPool
 }
 
 // NewEngine creates a new Engine instance.
 func NewEngine[C any](opts ...Option) *Engine[C] {
+	opt := getOption(opts...)
+	
+	// Initialize worker pool if not provided
+	var workerPool WorkerPool
+	if opt.workerPool != nil {
+		workerPool = opt.workerPool
+	} else {
+		// Create default worker pool with maxGoNum size
+		workerPool = NewDefaultWorkerPool(opt.maxGoNum)
+	}
+	
 	return &Engine[C]{
 		rootNode:   make([]string, 0),
 		nodeToNext: make(map[string][]string),
 		nodeStat:   make(map[string]*nodeStat),
 		nodeExec:   make(map[string]func(context.Context, C) error),
-		opt:        getOption(opts...),
+		opt:        opt,
+		workerPool: workerPool,
 	}
 }
 
@@ -144,12 +157,72 @@ func (e *Engine[C]) Execute(ctx context.Context, c C) error {
 	for _, name := range e.rootNode {
 		nodeToRun := name // Capture loop variable to prevent race condition.
 		eg.Go(func() error {
-			return e.executeNode(gCtx, nodeToRun, c, eg)
+			return e.executeNodeWithPool(gCtx, nodeToRun, c, eg)
 		})
 	}
 	return eg.Wait()
 }
 
+// executeNodeWithPool executes a node using the global worker pool for concurrency control
+func (e *Engine[C]) executeNodeWithPool(ctx context.Context, name string, c C, eg *errgroup.Group) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	start := time.Now()
+	stat := e.nodeStat[name]
+
+	// Create a channel to wait for task completion
+	done := make(chan error, 1)
+
+	// Submit the actual node execution to the worker pool
+	err := e.workerPool.SubmitWithContext(ctx, func() {
+		defer func() {
+			stat.Done()
+			stat.cost = int32(time.Since(start).Milliseconds())
+		}()
+
+		if execErr := e.nodeExec[name](ctx, c); execErr != nil {
+			stat.err.Store(execErr)
+			done <- execErr
+			return
+		}
+		done <- nil
+	})
+
+	if err != nil {
+		return err
+	}
+
+	// Wait for task completion
+	select {
+	case execErr := <-done:
+		if execErr != nil {
+			return execErr
+		}
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
+	// Schedule next nodes
+	for _, next := range e.nodeToNext[name] {
+		nextStat := e.nodeStat[next]
+		if nextStat == nil {
+			continue // Should not happen with a successful Build()
+		}
+
+		if atomic.AddInt32(&nextStat.degree, -1) == 0 {
+			nodeToRun := next // Capture loop variable to prevent race condition.
+			eg.Go(func() error {
+				return e.executeNodeWithPool(ctx, nodeToRun, c, eg)
+			})
+		}
+	}
+
+	return nil
+}
+
+// executeNode is the original method kept for backward compatibility
 func (e *Engine[C]) executeNode(ctx context.Context, name string, c C, eg *errgroup.Group) error {
 	if err := ctx.Err(); err != nil {
 		return err
