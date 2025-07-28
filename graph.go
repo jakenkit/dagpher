@@ -37,5 +37,7 @@ func (g *Graph[C]) Build() error {
 }
 
 func (g *Graph[C]) Exec(ctx context.Context, execCtx C) error {
+	g.group.SetMaxGoNum(g.maxGoNum)
+	g.group.AddMiddleware(g.globalMws...)
 	return g.group.Exec(ctx, execCtx)
 }

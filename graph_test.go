@@ -122,7 +122,7 @@ func TestGraph(t *testing.T) {
 	)
 	Convey("serial", t, func() {
 		A, B, C, D, E := NewCalcNodes(Param{SetDep: true})
-		graph := NewGraph[*Tuple2]()
+		graph := NewGraph[*Tuple2]().SetMaxGoNum(1)
 		now := time.Now()
 		graph.AddNode(A)
 		graph.AddNode(B)

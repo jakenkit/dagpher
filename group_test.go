@@ -80,19 +80,18 @@ func TestGroupExecution(t *testing.T) {
 			c.Log("B executed")
 			return nil
 		})
+		// A -> subgroup1 -> C
+		// subgroup1 contains B
 		nodeC := NewNode("C", func(ctx context.Context, c *TestContext) error {
 			c.Log("C executed")
 			return nil
-		}, "B")
+		}, "subgroup1") // C depends on the whole subgroup1
 
 		subGroup1 := NewGroup[*TestContext]("subgroup1", "A")
 		subGroup1.AddNode(nodeB)
 
-		subGroup2 := NewGroup[*TestContext]("subgroup2", "subgroup1")
-		subGroup2.AddNode(nodeC)
-
-		subGroup1.AddNode(subGroup2)
 		rootGroup.AddNode(subGroup1)
+		rootGroup.AddNode(nodeC)
 
 		executor := newGroupExecutor(rootGroup, 1)
 		require.NoError(t, executor.Build())

@@ -90,58 +90,67 @@ func newGroupExecutor[C any](group *Group[C], maxGoNum int, globalMws ...Middlew
 }
 
 func (g *groupExecutor[C]) Build() error {
-	allNodes := make(map[string]Node[C])
-	allOptions := make(map[string]*option)
 	visited := make(map[*Group[C]]bool)
 
-	var collect func(group *Group[C])
-	collect = func(group *Group[C]) {
+	var collectAndAddNodes func(group *Group[C]) error
+	collectAndAddNodes = func(group *Group[C]) error {
 		if visited[group] {
-			return
+			return nil
 		}
 		visited[group] = true
 
 		for name, node := range group.nodeMap {
-			if _, exists := allNodes[name]; exists {
-				panic("node with the same name already exists: " + name)
+			capturedNode := node
+			capturedName := name
+
+			// If the node is a sub-group, create an executor for it and add it as a single node.
+			if subGroup, ok := capturedNode.(*Group[C]); ok {
+				// Create a new executor for the sub-group.
+				subGroupExec := newGroupExecutor(subGroup, subGroup.maxGoNum, subGroup.globalMws...)
+				if err := subGroupExec.Build(); err != nil {
+					return err
+				}
+
+				// Add the sub-group as a single node to the parent executor.
+				err := g.exec.AddNode(capturedName, subGroupExec.Execute, capturedNode.Dependencies()...)
+				if err != nil {
+					return err
+				}
+			} else {
+				// This is a regular node.
+				opt := group.nodeOptions[capturedName]
+				mws := opt.mergeMws(g.globalMws)
+
+				execNode := func(ctx context.Context, c C) error {
+					_, err := Chain(mws...)(func(ctx context.Context, in any) (out any, err error) {
+						realIn, ok := in.(C)
+						if !ok {
+							return nil, fmt.Errorf("expected input type %T, got %T", c, in)
+						}
+
+						err = capturedNode.Exec(ctx, realIn)
+						if err != nil {
+							return nil, err
+						}
+						return realIn, nil
+					})(ctx, c)
+					if err != nil {
+						return err
+					}
+					return nil
+				}
+
+				err := g.exec.AddNode(capturedName, execNode, capturedNode.Dependencies()...)
+				if err != nil {
+					return err
+				}
 			}
-			allNodes[name] = node
-			allOptions[name] = group.nodeOptions[name]
 		}
+		return nil
 	}
 
-	collect(g.group)
-
-	for name, node := range allNodes {
-		capturedNode := node
-		capturedName := name
-
-		opt := allOptions[capturedName]
-		mws := opt.mergeMws(g.globalMws)
-
-		execNode := func(ctx context.Context, c C) error {
-			_, err := Chain(mws...)(func(ctx context.Context, in any) (out any, err error) {
-				realIn, ok := in.(C)
-				if !ok {
-					return nil, fmt.Errorf("expected input type %T, got %T", c, in)
-				}
-
-				err = capturedNode.Exec(ctx, realIn)
-				if err != nil {
-					return nil, err
-				}
-				return realIn, nil
-			})(ctx, c)
-			if err != nil {
-				return err
-			}
-			return nil
-		}
-
-		err := g.exec.AddNode(capturedName, execNode, capturedNode.Dependencies()...)
-		if err != nil {
-			return err
-		}
+	if err := collectAndAddNodes(g.group); err != nil {
+		return err
 	}
 
 	return g.exec.Build()
