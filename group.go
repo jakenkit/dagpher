@@ -5,15 +5,16 @@ import (
 	"fmt"
 
 	"github.com/jakenier/dagpher/executor"
+	"github.com/jakenier/dagpher/pool"
 )
 
 type Group[C any] struct {
 	name        string
-	maxGoNum    int
 	deps        []string
 	globalMws   []Middleware
 	nodeMap     map[string]Node[C]
 	nodeOptions map[string]*option
+	pool        pool.Pool
 
 	groupExec *groupExecutor[C]
 }
@@ -41,8 +42,8 @@ func (g *Group[C]) AddMiddleware(mws ...Middleware) *Group[C] {
 	return g
 }
 
-func (g *Group[C]) SetMaxGoNum(maxGoNum int) *Group[C] {
-	g.maxGoNum = maxGoNum
+func (g *Group[C]) SetPool(p pool.Pool) *Group[C] {
+	g.pool = p
 	return g
 }
 
@@ -51,7 +52,7 @@ func (g *Group[C]) Dependencies() []string {
 }
 
 func (g *Group[C]) Build() error {
-	g.groupExec = newGroupExecutor(g, g.maxGoNum, g.globalMws...)
+	g.groupExec = newGroupExecutor(g, g.pool, g.globalMws...)
 	return g.groupExec.Build()
 }
 
@@ -71,21 +72,24 @@ func (g *Group[C]) Name() string {
 }
 
 type groupExecutor[C any] struct {
-	maxGoNum  int64
 	group     *Group[C]
 	globalMws []Middleware
 	exec      *executor.Engine[C]
+	pool      pool.Pool
 }
 
-func newGroupExecutor[C any](group *Group[C], maxGoNum int, globalMws ...Middleware) *groupExecutor[C] {
-	exec := executor.NewEngine[C]()
-	if maxGoNum != 0 {
-		exec = executor.NewEngine[C](executor.WithMaxGoNum(maxGoNum))
+func newGroupExecutor[C any](group *Group[C], p pool.Pool, globalMws ...Middleware) *groupExecutor[C] {
+	var opts []executor.Option
+	if p != nil {
+		opts = append(opts, executor.WithPool(p))
 	}
+
+	exec := executor.NewEngine[C](opts...)
 	return &groupExecutor[C]{
 		group:     group,
 		globalMws: globalMws,
 		exec:      exec,
+		pool:      p,
 	}
 }
 
@@ -106,7 +110,7 @@ func (g *groupExecutor[C]) Build() error {
 			// If the node is a sub-group, create an executor for it and add it as a single node.
 			if subGroup, ok := capturedNode.(*Group[C]); ok {
 				// Create a new executor for the sub-group.
-				subGroupExec := newGroupExecutor(subGroup, subGroup.maxGoNum, subGroup.globalMws...)
+				subGroupExec := newGroupExecutor(subGroup, subGroup.pool, subGroup.globalMws...)
 				if err := subGroupExec.Build(); err != nil {
 					return err
 				}

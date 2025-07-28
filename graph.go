@@ -1,6 +1,10 @@
 package dagpher
 
-import "context"
+import (
+	"context"
+
+	"github.com/jakenier/dagpher/pool"
+)
 
 const (
 	DefaultGraphName = "dagpher_graph"
@@ -10,12 +14,18 @@ type Graph[C any] struct {
 	globalMws []Middleware
 	group     *Group[C]
 	maxGoNum  int
+	pool      pool.Pool
 }
 
 func NewGraph[C any]() *Graph[C] {
 	return &Graph[C]{
 		group: NewGroup[C](DefaultGraphName),
 	}
+}
+
+func (g *Graph[C]) SetPool(p pool.Pool) *Graph[C] {
+	g.pool = p
+	return g
 }
 
 func (g *Graph[C]) SetMaxGoNum(maxGoNum int) *Graph[C] {
@@ -37,7 +47,12 @@ func (g *Graph[C]) Build() error {
 }
 
 func (g *Graph[C]) Exec(ctx context.Context, execCtx C) error {
-	g.group.SetMaxGoNum(g.maxGoNum)
+	if g.pool == nil && g.maxGoNum > 0 {
+		g.pool = pool.New(g.maxGoNum)
+		defer g.pool.Stop()
+	}
+
+	g.group.SetPool(g.pool)
 	g.group.AddMiddleware(g.globalMws...)
 	return g.group.Exec(ctx, execCtx)
 }

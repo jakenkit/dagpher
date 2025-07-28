@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jakenier/dagpher/pool"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -20,18 +21,21 @@ type Engine[C any] struct {
 	nodeToNext map[string][]string
 	nodeStat   map[string]*nodeStat
 	nodeExec   map[string]func(context.Context, C) error
+	pool       pool.Pool
 
 	opt *option
 }
 
 // NewEngine creates a new Engine instance.
 func NewEngine[C any](opts ...Option) *Engine[C] {
+	opt := getOption(opts...)
 	return &Engine[C]{
 		rootNode:   make([]string, 0),
 		nodeToNext: make(map[string][]string),
 		nodeStat:   make(map[string]*nodeStat),
 		nodeExec:   make(map[string]func(context.Context, C) error),
-		opt:        getOption(opts...),
+		pool:       opt.pool,
+		opt:        opt,
 	}
 }
 
@@ -141,11 +145,29 @@ func (e *Engine[C]) Build() error {
 
 func (e *Engine[C]) Execute(ctx context.Context, c C) error {
 	eg, gCtx := errgroup.WithContext(ctx)
+
+	executeFunc := func(name string) func() error {
+		return func() error {
+			return e.executeNode(gCtx, name, c, eg)
+		}
+	}
+
 	for _, name := range e.rootNode {
-		nodeToRun := name // Capture loop variable to prevent race condition.
-		eg.Go(func() error {
-			return e.executeNode(gCtx, nodeToRun, c, eg)
-		})
+		nodeToRun := name // Capture loop variable
+		if e.pool != nil {
+			eg.Go(func() error { // This outer Go routine is for errgroup to wait for the task result
+				var err error
+				ch := make(chan struct{})
+				e.pool.Submit(func() {
+					err = executeFunc(nodeToRun)()
+					close(ch)
+				})
+				<-ch
+				return err
+			})
+		} else {
+			eg.Go(executeFunc(nodeToRun))
+		}
 	}
 	return eg.Wait()
 }
@@ -179,10 +201,25 @@ func (e *Engine[C]) executeNode(ctx context.Context, name string, c C, eg *errgr
 		}
 
 		if atomic.AddInt32(&nextStat.degree, -1) == 0 {
-			nodeToRun := next // Capture loop variable to prevent race condition.
-			eg.Go(func() error {
+			nodeToRun := next // Capture loop variable
+			executeFunc := func() error {
 				return e.executeNode(ctx, nodeToRun, c, eg)
-			})
+			}
+
+			if e.pool != nil {
+				eg.Go(func() error { // This outer Go routine is for errgroup to wait for the task result
+					var err error
+					ch := make(chan struct{})
+					e.pool.Submit(func() {
+						err = executeFunc()
+						close(ch)
+					})
+					<-ch
+					return err
+				})
+			} else {
+				eg.Go(executeFunc)
+			}
 		}
 	}
 

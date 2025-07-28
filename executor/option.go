@@ -1,15 +1,15 @@
 package executor
 
+import "github.com/jakenier/dagpher/pool"
+
 type option struct {
-	maxGoNum int // maximum number of goroutines to run concurrently
+	pool pool.Pool
 }
 
 type Option func(*option)
 
 func defaultOption() *option {
-	return &option{
-		maxGoNum: 100, // default to 1 goroutine
-	}
+	return &option{}
 }
 
 func getOption(opts ...Option) *option {
@@ -20,11 +20,8 @@ func getOption(opts ...Option) *option {
 	return opt
 }
 
-func WithMaxGoNum(maxGoNum int) Option {
+func WithPool(p pool.Pool) Option {
 	return func(o *option) {
-		if maxGoNum <= 0 {
-			panic("maxGoNum must be greater than 0")
-		}
-		o.maxGoNum = maxGoNum
+		o.pool = p
 	}
 }
