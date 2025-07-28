@@ -8,16 +8,22 @@ import (
 )
 
 type Group[C any] struct {
+	name        string
+	maxGoNum    int
+	deps        []string
+	globalMws   []Middleware
 	nodeMap     map[string]Node[C]
 	nodeOptions map[string]*option
-	subGroups   []*Group[C]
+
+	groupExec *groupExecutor[C]
 }
 
-func NewGroup[C any]() *Group[C] {
+func NewGroup[C any](name string, deps ...string) *Group[C] {
 	return &Group[C]{
+		name:        name,
+		deps:        deps,
 		nodeMap:     make(map[string]Node[C]),
 		nodeOptions: make(map[string]*option),
-		subGroups:   make([]*Group[C], 0),
 	}
 }
 
@@ -30,26 +36,56 @@ func (g *Group[C]) AddNode(node Node[C], opts ...Option) {
 	g.nodeOptions[node.Name()] = getOption(opts...)
 }
 
-func (g *Group[C]) AddSubGroup(subGroup *Group[C]) {
-	if subGroup == nil {
-		panic("subGroup cannot be nil")
+func (g *Group[C]) AddMiddleware(mws ...Middleware) *Group[C] {
+	g.globalMws = append(g.globalMws, mws...)
+	return g
+}
+
+func (g *Group[C]) SetMaxGoNum(maxGoNum int) *Group[C] {
+	g.maxGoNum = maxGoNum
+	return g
+}
+
+func (g *Group[C]) Dependencies() []string {
+	return g.deps
+}
+
+func (g *Group[C]) Build() error {
+	g.groupExec = newGroupExecutor(g, g.maxGoNum, g.globalMws...)
+	return g.groupExec.Build()
+}
+
+func (g *Group[C]) Exec(ctx context.Context, execCtx C) error {
+	if g.groupExec == nil {
+		err := g.Build()
+		if err != nil {
+			return err
+		}
 	}
-	g.subGroups = append(g.subGroups, subGroup)
+
+	return g.groupExec.Execute(ctx, execCtx)
+}
+
+func (g *Group[C]) Name() string {
+	return g.name
 }
 
 type groupExecutor[C any] struct {
-	execCtx   C
+	maxGoNum  int64
 	group     *Group[C]
 	globalMws []Middleware
 	exec      *executor.Engine[C]
 }
 
-func NewGroupExecutor[C any](execCtx C, group *Group[C], globalMws ...Middleware) *groupExecutor[C] {
+func newGroupExecutor[C any](group *Group[C], maxGoNum int, globalMws ...Middleware) *groupExecutor[C] {
+	exec := executor.NewEngine[C]()
+	if maxGoNum != 0 {
+		exec = executor.NewEngine[C](executor.WithMaxGoNum(maxGoNum))
+	}
 	return &groupExecutor[C]{
-		execCtx:   execCtx,
 		group:     group,
 		globalMws: globalMws,
-		exec:      executor.NewEngine[C](),
+		exec:      exec,
 	}
 }
 
@@ -71,10 +107,6 @@ func (g *groupExecutor[C]) Build() error {
 			}
 			allNodes[name] = node
 			allOptions[name] = group.nodeOptions[name]
-		}
-
-		for _, sub := range group.subGroups {
-			collect(sub)
 		}
 	}
 
@@ -106,16 +138,19 @@ func (g *groupExecutor[C]) Build() error {
 			return nil
 		}
 
-		g.exec.AddNode(capturedName, execNode, capturedNode.Dependencies()...)
+		err := g.exec.AddNode(capturedName, execNode, capturedNode.Dependencies()...)
+		if err != nil {
+			return err
+		}
 	}
 
 	return g.exec.Build()
 }
 
-func (g *groupExecutor[C]) Execute(ctx context.Context) error {
+func (g *groupExecutor[C]) Execute(ctx context.Context, execCtx C) error {
 	if g.exec == nil {
 		return fmt.Errorf("executor is not built, call Build() first")
 	}
 
-	return g.exec.Execute(ctx, g.execCtx)
+	return g.exec.Execute(ctx, execCtx)
 }

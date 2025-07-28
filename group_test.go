@@ -31,93 +31,94 @@ func (c *TestContext) GetLog() []string {
 func TestGroupExecution(t *testing.T) {
 	t.Run("simple group with one node", func(t *testing.T) {
 		testCtx := &TestContext{}
-		group := NewGroup[*TestContext]()
-		nodeA := NewQuickNode("A", func(ctx context.Context, c *TestContext) error {
+		group := NewGroup[*TestContext]("simple_group_with_one_node")
+		nodeA := NewNode("A", func(ctx context.Context, c *TestContext) error {
 			c.Log("A executed")
 			return nil
 		})
 		group.AddNode(nodeA)
 
-		executor := NewGroupExecutor(testCtx, group)
+		executor := newGroupExecutor(group, 1)
 		require.NoError(t, executor.Build())
-		require.NoError(t, executor.Execute(context.Background()))
+		require.NoError(t, executor.Execute(context.Background(), testCtx))
 
 		assert.Equal(t, []string{"A executed"}, testCtx.GetLog())
 	})
 
 	t.Run("group with dependencies", func(t *testing.T) {
 		testCtx := &TestContext{}
-		group := NewGroup[*TestContext]()
-		nodeA := NewQuickNode("A", func(ctx context.Context, c *TestContext) error {
+		group := NewGroup[*TestContext]("group_with_dependencies")
+		nodeA := NewNode("A", func(ctx context.Context, c *TestContext) error {
 			c.Log("A executed")
 			return nil
 		})
-		nodeB := NewQuickNode("B", func(ctx context.Context, c *TestContext) error {
+		nodeB := NewNode("B", func(ctx context.Context, c *TestContext) error {
 			c.Log("B executed")
 			return nil
 		}, "A")
 		group.AddNode(nodeA)
 		group.AddNode(nodeB)
 
-		executor := NewGroupExecutor(testCtx, group)
+		executor := newGroupExecutor(group, 1)
 		require.NoError(t, executor.Build())
-		require.NoError(t, executor.Execute(context.Background()))
+		require.NoError(t, executor.Execute(context.Background(), testCtx))
 
 		assert.Equal(t, []string{"A executed", "B executed"}, testCtx.GetLog())
 	})
 
 	t.Run("nested subgroups", func(t *testing.T) {
 		testCtx := &TestContext{}
-		rootGroup := NewGroup[*TestContext]()
-		subGroup1 := NewGroup[*TestContext]()
-		subGroup2 := NewGroup[*TestContext]()
+		rootGroup := NewGroup[*TestContext]("root_group")
 
-		nodeA := NewQuickNode("A", func(ctx context.Context, c *TestContext) error {
+		nodeA := NewNode("A", func(ctx context.Context, c *TestContext) error {
 			c.Log("A executed")
 			return nil
 		})
-		nodeB := NewQuickNode("B", func(ctx context.Context, c *TestContext) error {
+		rootGroup.AddNode(nodeA)
+
+		nodeB := NewNode("B", func(ctx context.Context, c *TestContext) error {
 			c.Log("B executed")
 			return nil
-		}, "A")
-		nodeC := NewQuickNode("C", func(ctx context.Context, c *TestContext) error {
+		})
+		nodeC := NewNode("C", func(ctx context.Context, c *TestContext) error {
 			c.Log("C executed")
 			return nil
 		}, "B")
 
-		rootGroup.AddNode(nodeA)
+		subGroup1 := NewGroup[*TestContext]("subgroup1", "A")
 		subGroup1.AddNode(nodeB)
-		subGroup2.AddNode(nodeC)
-		subGroup1.AddSubGroup(subGroup2)
-		rootGroup.AddSubGroup(subGroup1)
 
-		executor := NewGroupExecutor(testCtx, rootGroup)
+		subGroup2 := NewGroup[*TestContext]("subgroup2", "subgroup1")
+		subGroup2.AddNode(nodeC)
+
+		subGroup1.AddNode(subGroup2)
+		rootGroup.AddNode(subGroup1)
+
+		executor := newGroupExecutor(rootGroup, 1)
 		require.NoError(t, executor.Build())
-		require.NoError(t, executor.Execute(context.Background()))
+		require.NoError(t, executor.Execute(context.Background(), testCtx))
 
 		assert.Equal(t, []string{"A executed", "B executed", "C executed"}, testCtx.GetLog())
 	})
 
-	t.Run("duplicate node in different groups panics", func(t *testing.T) {
-		rootGroup := NewGroup[*TestContext]()
-		subGroup := NewGroup[*TestContext]()
+	t.Run("duplicate node in different groups not panics", func(t *testing.T) {
+		rootGroup := NewGroup[*TestContext]("root_group")
+		subGroup := NewGroup[*TestContext]("subgroup")
 
-		nodeA1 := NewQuickNode("A", func(ctx context.Context, c *TestContext) error { return nil })
-		nodeA2 := NewQuickNode("A", func(ctx context.Context, c *TestContext) error { return nil })
+		nodeA1 := NewNode("A", func(ctx context.Context, c *TestContext) error { return nil })
+		nodeA2 := NewNode("A", func(ctx context.Context, c *TestContext) error { return nil })
 
 		rootGroup.AddNode(nodeA1)
 		subGroup.AddNode(nodeA2)
-		rootGroup.AddSubGroup(subGroup)
+		rootGroup.AddNode(subGroup)
 
-		executor := NewGroupExecutor(&TestContext{}, rootGroup)
-		assert.PanicsWithValue(t, "node with the same name already exists: A", func() {
-			executor.Build()
-		})
+		executor := newGroupExecutor(rootGroup, 1)
+		require.NoError(t, executor.Build())
 	})
 
 	t.Run("middleware execution order", func(t *testing.T) {
 		testCtx := &TestContext{}
-		group := NewGroup[*TestContext]()
+		group := NewGroup[*TestContext]("test_group")
 
 		mw1 := func(next Endpoint) Endpoint {
 			return func(ctx context.Context, req any) (any, error) {
@@ -136,15 +137,15 @@ func TestGroupExecution(t *testing.T) {
 			}
 		}
 
-		nodeA := NewQuickNode("A", func(ctx context.Context, c *TestContext) error {
+		nodeA := NewNode("A", func(ctx context.Context, c *TestContext) error {
 			c.Log("A executed")
 			return nil
 		})
 		group.AddNode(nodeA, WithMiddlewares(mw2))
 
-		executor := NewGroupExecutor(testCtx, group, mw1)
+		executor := newGroupExecutor(group, 1, mw1)
 		require.NoError(t, executor.Build())
-		require.NoError(t, executor.Execute(context.Background()))
+		require.NoError(t, executor.Execute(context.Background(), testCtx))
 
 		expectedLog := []string{
 			"global mw1 start",
@@ -158,21 +159,21 @@ func TestGroupExecution(t *testing.T) {
 
 	t.Run("loop variable capture", func(t *testing.T) {
 		testCtx := &TestContext{}
-		group := NewGroup[*TestContext]()
+		group := NewGroup[*TestContext]("loop_group")
 
 		// Add multiple nodes to test if the loop variable was captured correctly.
 		nodes := []Node[*TestContext]{
-			NewQuickNode("A", func(ctx context.Context, c *TestContext) error { c.Log("A"); return nil }),
-			NewQuickNode("B", func(ctx context.Context, c *TestContext) error { c.Log("B"); return nil }),
-			NewQuickNode("C", func(ctx context.Context, c *TestContext) error { c.Log("C"); return nil }),
+			NewNode("A", func(ctx context.Context, c *TestContext) error { c.Log("A"); return nil }),
+			NewNode("B", func(ctx context.Context, c *TestContext) error { c.Log("B"); return nil }),
+			NewNode("C", func(ctx context.Context, c *TestContext) error { c.Log("C"); return nil }),
 		}
 		for _, n := range nodes {
 			group.AddNode(n)
 		}
 
-		executor := NewGroupExecutor(testCtx, group)
+		executor := newGroupExecutor(group, 1)
 		require.NoError(t, executor.Build())
-		require.NoError(t, executor.Execute(context.Background()))
+		require.NoError(t, executor.Execute(context.Background(), testCtx))
 
 		// The order is not guaranteed, so we check for the presence of all logs.
 		logs := testCtx.GetLog()

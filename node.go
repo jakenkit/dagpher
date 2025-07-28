@@ -28,7 +28,7 @@ func (q *quickNode[C]) Name() string {
 	return q.name
 }
 
-func NewQuickNode[C any](name string, fn func(ctx context.Context, c C) error, deps ...string) Node[C] {
+func NewNode[C any](name string, fn func(ctx context.Context, c C) error, deps ...string) Node[C] {
 	return &quickNode[C]{
 		name: name,
 		deps: deps,
