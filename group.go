@@ -125,12 +125,14 @@ func (g *groupExecutor[C]) Build() error {
 				}
 
 				// Add the sub-group as a single node to the parent executor.
-				err := g.exec.AddNode(capturedName, subGroupExec.Execute, capturedNode.Dependencies()...)
+				// 注意：这里使用AddNode而不是AddLeafNode，因为subGroup不是叶子节点
+				// subGroup的执行不消耗信号量，因为其内部的叶子节点会消耗信号量
+				err := g.exec.AddContainerNode(capturedName, subGroupExec.Execute, capturedNode.Dependencies()...)
 				if err != nil {
 					return err
 				}
 			} else {
-				// This is a regular node.
+				// This is a regular node (叶子节点).
 				opt := group.nodeOptions[capturedName]
 				mws := opt.mergeMws(g.globalMws)
 
@@ -153,6 +155,8 @@ func (g *groupExecutor[C]) Build() error {
 					return nil
 				}
 
+				// 使用AddLeafNode为叶子节点添加信号量控制
+				// 只有真正执行业务逻辑的叶子节点才会消耗信号量
 				err := g.exec.AddNode(capturedName, execNode, capturedNode.Dependencies()...)
 				if err != nil {
 					return err

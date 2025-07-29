@@ -40,9 +40,30 @@ func (e *Engine[C]) AddNode(name string, exec func(context.Context, C) error, de
 		return errors.New("node already exists: " + name)
 	}
 
-	// 包装执行函数，加入信号量控制
 	wrappedExec := e.wrapWithSemaphore(exec)
 	e.nodeExec[name] = wrappedExec
+	e.nodeStat[name] = &nodeStat{
+		done: make(chan struct{}),
+	}
+
+	for _, dep := range deps {
+		if len(dep) == 0 {
+			continue // skip empty dependencies
+		}
+
+		e.nodeToNext[dep] = append(e.nodeToNext[dep], name)
+	}
+	return nil
+}
+
+// AddContainerNode 添加节点但不使用信号量控制（用于Group等容器节点）
+func (e *Engine[C]) AddContainerNode(name string, exec func(context.Context, C) error, deps ...string) error {
+	if _, exists := e.nodeExec[name]; exists {
+		return errors.New("node already exists: " + name)
+	}
+
+	// 直接使用原始执行函数，不包装信号量
+	e.nodeExec[name] = exec
 	e.nodeStat[name] = &nodeStat{
 		done: make(chan struct{}),
 	}

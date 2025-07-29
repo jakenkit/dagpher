@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -246,5 +248,259 @@ func TestGraph(t *testing.T) {
 		cost := time.Since(now)
 		So(cost, ShouldBeGreaterThanOrEqualTo, time.Millisecond*1450)
 		So(cost, ShouldBeLessThan, time.Millisecond*1459)
+	})
+}
+
+// TestGlobalSemaphore tests the global semaphore concurrency control
+func TestGlobalSemaphore(t *testing.T) {
+	Convey("Test Global Semaphore Concurrency Control", t, func() {
+		Convey("Test Serial Execution (maxGoNum=1)", func() {
+			// Create nodes with tracking execution order
+			var execOrder []string
+			var orderMutex sync.Mutex
+
+			addToOrder := func(name string) {
+				orderMutex.Lock()
+				defer orderMutex.Unlock()
+				execOrder = append(execOrder, name)
+			}
+
+			// Create nodes that can run in parallel but should be serialized
+			nodeA := NewNode("A", func(ctx context.Context, c *Tuple2) error {
+				addToOrder("A_start")
+				time.Sleep(50 * time.Millisecond)
+				addToOrder("A_end")
+				return nil
+			})
+
+			nodeB := NewNode("B", func(ctx context.Context, c *Tuple2) error {
+				addToOrder("B_start")
+				time.Sleep(50 * time.Millisecond)
+				addToOrder("B_end")
+				return nil
+			})
+
+			nodeC := NewNode("C", func(ctx context.Context, c *Tuple2) error {
+				addToOrder("C_start")
+				time.Sleep(50 * time.Millisecond)
+				addToOrder("C_end")
+				return nil
+			})
+
+			graph := NewGraph[*Tuple2]()
+			graph.SetMaxGoNum(1) // Force serial execution
+			graph.AddNode(nodeA)
+			graph.AddNode(nodeB)
+			graph.AddNode(nodeC)
+
+			err := graph.Build()
+			So(err, ShouldBeNil)
+
+			start := time.Now()
+			ctx := context.Background()
+			tuple := &Tuple2{}
+			err = graph.Exec(ctx, tuple)
+			duration := time.Since(start)
+
+			So(err, ShouldBeNil)
+			// Should take at least 150ms (3 * 50ms) for serial execution
+			So(duration, ShouldBeGreaterThanOrEqualTo, 150*time.Millisecond)
+
+			// Verify serial execution: each node should complete before the next starts
+			orderMutex.Lock()
+			defer orderMutex.Unlock()
+			So(len(execOrder), ShouldEqual, 6)
+			// Check that no two nodes overlap
+			for i := 0; i < len(execOrder)-1; i += 2 {
+				startEvent := execOrder[i]
+				endEvent := execOrder[i+1]
+				So(startEvent, ShouldEndWith, "_start")
+				So(endEvent, ShouldEndWith, "_end")
+				So(startEvent[:1], ShouldEqual, endEvent[:1]) // Same node
+			}
+		})
+
+		Convey("Test Limited Parallel Execution (maxGoNum=2)", func() {
+			var activeCount int32
+			var maxActiveCount int32
+
+			createNode := func(name string, duration time.Duration) Node[*Tuple2] {
+				return NewNode(name, func(ctx context.Context, c *Tuple2) error {
+					current := atomic.AddInt32(&activeCount, 1)
+					for {
+						max := atomic.LoadInt32(&maxActiveCount)
+						if current <= max || atomic.CompareAndSwapInt32(&maxActiveCount, max, current) {
+							break
+						}
+					}
+					time.Sleep(duration)
+					atomic.AddInt32(&activeCount, -1)
+					return nil
+				})
+			}
+
+			// Create 4 independent nodes
+			nodeA := createNode("A", 100*time.Millisecond)
+			nodeB := createNode("B", 100*time.Millisecond)
+			nodeC := createNode("C", 100*time.Millisecond)
+			nodeD := createNode("D", 100*time.Millisecond)
+
+			graph := NewGraph[*Tuple2]()
+			graph.SetMaxGoNum(2) // Allow max 2 concurrent executions
+			graph.AddNode(nodeA)
+			graph.AddNode(nodeB)
+			graph.AddNode(nodeC)
+			graph.AddNode(nodeD)
+
+			err := graph.Build()
+			So(err, ShouldBeNil)
+
+			start := time.Now()
+			ctx := context.Background()
+			tuple := &Tuple2{}
+			err = graph.Exec(ctx, tuple)
+			duration := time.Since(start)
+
+			So(err, ShouldBeNil)
+			// Should take around 200ms (2 batches of 2 parallel executions)
+			So(duration, ShouldBeGreaterThanOrEqualTo, 190*time.Millisecond)
+			So(duration, ShouldBeLessThan, 250*time.Millisecond)
+
+			// Verify that max concurrent executions never exceeded 2
+			So(atomic.LoadInt32(&maxActiveCount), ShouldBeLessThanOrEqualTo, 2)
+		})
+
+		Convey("Test Global Semaphore with Groups", func() {
+			var activeCount int32
+			var maxActiveCount int32
+
+			createNode := func(name string) Node[*Tuple2] {
+				return NewNode(name, func(ctx context.Context, c *Tuple2) error {
+					current := atomic.AddInt32(&activeCount, 1)
+					for {
+						max := atomic.LoadInt32(&maxActiveCount)
+						if current <= max || atomic.CompareAndSwapInt32(&maxActiveCount, max, current) {
+							break
+						}
+					}
+					time.Sleep(50 * time.Millisecond)
+					atomic.AddInt32(&activeCount, -1)
+					return nil
+				})
+			}
+
+			// Create nodes in different groups
+			nodeA := createNode("A")
+			nodeB := createNode("B")
+			nodeC := createNode("C")
+			nodeD := createNode("D")
+
+			// Create sub-groups
+			group1 := NewGroup[*Tuple2]("group1")
+			group1.AddNode(nodeA)
+			group1.AddNode(nodeB)
+
+			group2 := NewGroup[*Tuple2]("group2")
+			group2.AddNode(nodeC)
+			group2.AddNode(nodeD)
+
+			graph := NewGraph[*Tuple2]()
+			graph.SetMaxGoNum(2) // Global limit of 2
+			graph.AddNode(group1)
+			graph.AddNode(group2)
+
+			err := graph.Build()
+			So(err, ShouldBeNil)
+
+			ctx := context.Background()
+			tuple := &Tuple2{}
+			err = graph.Exec(ctx, tuple)
+
+			So(err, ShouldBeNil)
+			// Verify global semaphore worked across groups
+			So(atomic.LoadInt32(&maxActiveCount), ShouldBeLessThanOrEqualTo, 2)
+		})
+
+		Convey("Test No Global Semaphore (maxGoNum=0)", func() {
+			var activeCount int32
+			var maxActiveCount int32
+
+			createNode := func(name string) Node[*Tuple2] {
+				return NewNode(name, func(ctx context.Context, c *Tuple2) error {
+					current := atomic.AddInt32(&activeCount, 1)
+					for {
+						max := atomic.LoadInt32(&maxActiveCount)
+						if current <= max || atomic.CompareAndSwapInt32(&maxActiveCount, max, current) {
+							break
+						}
+					}
+					time.Sleep(50 * time.Millisecond)
+					atomic.AddInt32(&activeCount, -1)
+					return nil
+				})
+			}
+
+			// Create 4 independent nodes
+			nodeA := createNode("A")
+			nodeB := createNode("B")
+			nodeC := createNode("C")
+			nodeD := createNode("D")
+
+			graph := NewGraph[*Tuple2]()
+			// Don't set maxGoNum, should allow unlimited concurrency
+			graph.AddNode(nodeA)
+			graph.AddNode(nodeB)
+			graph.AddNode(nodeC)
+			graph.AddNode(nodeD)
+
+			err := graph.Build()
+			So(err, ShouldBeNil)
+
+			start := time.Now()
+			ctx := context.Background()
+			tuple := &Tuple2{}
+			err = graph.Exec(ctx, tuple)
+			duration := time.Since(start)
+
+			So(err, ShouldBeNil)
+			// Should complete quickly since all run in parallel
+			So(duration, ShouldBeLessThan, 100*time.Millisecond)
+			// Should allow all 4 to run concurrently
+			So(atomic.LoadInt32(&maxActiveCount), ShouldEqual, 4)
+		})
+
+		Convey("Test Semaphore Context Cancellation", func() {
+			createSlowNode := func(name string) Node[*Tuple2] {
+				return NewNode(name, func(ctx context.Context, c *Tuple2) error {
+					select {
+					case <-time.After(1 * time.Second):
+						return nil
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				})
+			}
+
+			nodeA := createSlowNode("A")
+			nodeB := createSlowNode("B")
+
+			graph := NewGraph[*Tuple2]()
+			graph.SetMaxGoNum(1) // Serial execution
+			graph.AddNode(nodeA)
+			graph.AddNode(nodeB)
+
+			err := graph.Build()
+			So(err, ShouldBeNil)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+
+			tuple := &Tuple2{}
+			err = graph.Exec(ctx, tuple)
+
+			// Should fail due to context timeout
+			So(err, ShouldNotBeNil)
+			So(err, ShouldEqual, context.DeadlineExceeded)
+		})
 	})
 }
