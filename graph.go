@@ -1,6 +1,10 @@
 package dagpher
 
-import "context"
+import (
+	"context"
+
+	"golang.org/x/sync/semaphore"
+)
 
 const (
 	DefaultGraphName = "dagpher_graph"
@@ -10,6 +14,8 @@ type Graph[C any] struct {
 	globalMws []Middleware
 	group     *Group[C]
 	maxGoNum  int
+
+	globalSem *semaphore.Weighted
 }
 
 func NewGraph[C any]() *Graph[C] {
@@ -20,6 +26,13 @@ func NewGraph[C any]() *Graph[C] {
 
 func (g *Graph[C]) SetMaxGoNum(maxGoNum int) *Graph[C] {
 	g.maxGoNum = maxGoNum
+
+	if maxGoNum > 0 {
+		g.globalSem = semaphore.NewWeighted(int64(maxGoNum))
+	} else {
+		g.globalSem = nil
+	}
+
 	return g
 }
 
@@ -33,11 +46,17 @@ func (g *Graph[C]) AddNode(node Node[C], opts ...Option) {
 }
 
 func (g *Graph[C]) Build() error {
+	if g.maxGoNum > 0 && g.globalSem == nil {
+		g.globalSem = semaphore.NewWeighted(int64(g.maxGoNum))
+	}
+
+	g.group.SetMaxGoNum(g.maxGoNum)
+	g.group.AddMiddleware(g.globalMws...)
+	g.group.SetGlobalSem(g.globalSem)
+
 	return g.group.Build()
 }
 
 func (g *Graph[C]) Exec(ctx context.Context, execCtx C) error {
-	g.group.SetMaxGoNum(g.maxGoNum)
-	g.group.AddMiddleware(g.globalMws...)
 	return g.group.Exec(ctx, execCtx)
 }

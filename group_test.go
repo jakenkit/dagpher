@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/sync/semaphore"
 )
 
 type TestContext struct {
@@ -38,7 +39,8 @@ func TestGroupExecution(t *testing.T) {
 		})
 		group.AddNode(nodeA)
 
-		executor := newGroupExecutor(group, 1)
+		sem := semaphore.NewWeighted(1)
+		executor := newGroupExecutor(group, sem)
 		require.NoError(t, executor.Build())
 		require.NoError(t, executor.Execute(context.Background(), testCtx))
 
@@ -59,7 +61,8 @@ func TestGroupExecution(t *testing.T) {
 		group.AddNode(nodeA)
 		group.AddNode(nodeB)
 
-		executor := newGroupExecutor(group, 1)
+		sem := semaphore.NewWeighted(1)
+		executor := newGroupExecutor(group, sem)
 		require.NoError(t, executor.Build())
 		require.NoError(t, executor.Execute(context.Background(), testCtx))
 
@@ -93,7 +96,8 @@ func TestGroupExecution(t *testing.T) {
 		rootGroup.AddNode(subGroup1)
 		rootGroup.AddNode(nodeC)
 
-		executor := newGroupExecutor(rootGroup, 1)
+		sem := semaphore.NewWeighted(1)
+		executor := newGroupExecutor(rootGroup, sem)
 		require.NoError(t, executor.Build())
 		require.NoError(t, executor.Execute(context.Background(), testCtx))
 
@@ -111,7 +115,8 @@ func TestGroupExecution(t *testing.T) {
 		subGroup.AddNode(nodeA2)
 		rootGroup.AddNode(subGroup)
 
-		executor := newGroupExecutor(rootGroup, 1)
+		sem := semaphore.NewWeighted(1)
+		executor := newGroupExecutor(rootGroup, sem)
 		require.NoError(t, executor.Build())
 	})
 
@@ -142,7 +147,8 @@ func TestGroupExecution(t *testing.T) {
 		})
 		group.AddNode(nodeA, WithMiddlewares(mw2))
 
-		executor := newGroupExecutor(group, 1, mw1)
+		sem := semaphore.NewWeighted(1)
+		executor := newGroupExecutor(group, sem, mw1)
 		require.NoError(t, executor.Build())
 		require.NoError(t, executor.Execute(context.Background(), testCtx))
 
@@ -170,7 +176,8 @@ func TestGroupExecution(t *testing.T) {
 			group.AddNode(n)
 		}
 
-		executor := newGroupExecutor(group, 1)
+		sem := semaphore.NewWeighted(1)
+		executor := newGroupExecutor(group, sem)
 		require.NoError(t, executor.Build())
 		require.NoError(t, executor.Execute(context.Background(), testCtx))
 

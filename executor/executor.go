@@ -40,7 +40,9 @@ func (e *Engine[C]) AddNode(name string, exec func(context.Context, C) error, de
 		return errors.New("node already exists: " + name)
 	}
 
-	e.nodeExec[name] = exec
+	// 包装执行函数，加入信号量控制
+	wrappedExec := e.wrapWithSemaphore(exec)
+	e.nodeExec[name] = wrappedExec
 	e.nodeStat[name] = &nodeStat{
 		done: make(chan struct{}),
 	}
@@ -53,6 +55,22 @@ func (e *Engine[C]) AddNode(name string, exec func(context.Context, C) error, de
 		e.nodeToNext[dep] = append(e.nodeToNext[dep], name)
 	}
 	return nil
+}
+
+// wrapWithSemaphore use semaphore to wrap func
+func (e *Engine[C]) wrapWithSemaphore(exec func(context.Context, C) error) func(context.Context, C) error {
+	return func(ctx context.Context, c C) error {
+		if e.opt.sem == nil {
+			return exec(ctx, c)
+		}
+
+		if err := e.opt.sem.Acquire(ctx, 1); err != nil {
+			return err
+		}
+		defer e.opt.sem.Release(1)
+
+		return exec(ctx, c)
+	}
 }
 
 func (e *Engine[C]) detectCycle() error {
@@ -141,6 +159,10 @@ func (e *Engine[C]) Build() error {
 
 func (e *Engine[C]) Execute(ctx context.Context, c C) error {
 	eg, gCtx := errgroup.WithContext(ctx)
+	if e.opt.sem == nil && e.opt.maxGoNum > 0 {
+		eg.SetLimit(e.opt.maxGoNum)
+	}
+
 	for _, name := range e.rootNode {
 		nodeToRun := name // Capture loop variable to prevent race condition.
 		eg.Go(func() error {

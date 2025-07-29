@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"golang.org/x/sync/semaphore"
+
 	"github.com/jakenier/dagpher/executor"
 )
 
@@ -15,6 +17,7 @@ type Group[C any] struct {
 	nodeMap     map[string]Node[C]
 	nodeOptions map[string]*option
 
+	globalSem *semaphore.Weighted
 	groupExec *groupExecutor[C]
 }
 
@@ -46,12 +49,17 @@ func (g *Group[C]) SetMaxGoNum(maxGoNum int) *Group[C] {
 	return g
 }
 
+func (g *Group[C]) SetGlobalSem(sem *semaphore.Weighted) *Group[C] {
+	g.globalSem = sem
+	return g
+}
+
 func (g *Group[C]) Dependencies() []string {
 	return g.deps
 }
 
 func (g *Group[C]) Build() error {
-	g.groupExec = newGroupExecutor(g, g.maxGoNum, g.globalMws...)
+	g.groupExec = newGroupExecutor(g, g.globalSem, g.globalMws...)
 	return g.groupExec.Build()
 }
 
@@ -75,17 +83,22 @@ type groupExecutor[C any] struct {
 	group     *Group[C]
 	globalMws []Middleware
 	exec      *executor.Engine[C]
+
+	globalSem *semaphore.Weighted
 }
 
-func newGroupExecutor[C any](group *Group[C], maxGoNum int, globalMws ...Middleware) *groupExecutor[C] {
-	exec := executor.NewEngine[C]()
-	if maxGoNum != 0 {
-		exec = executor.NewEngine[C](executor.WithMaxGoNum(maxGoNum))
+func newGroupExecutor[C any](group *Group[C], globalSem *semaphore.Weighted, globalMws ...Middleware) *groupExecutor[C] {
+	var opts []executor.Option
+	if globalSem != nil {
+		opts = append(opts, executor.WithSem(globalSem))
 	}
+	exec := executor.NewEngine[C](opts...)
+
 	return &groupExecutor[C]{
 		group:     group,
 		globalMws: globalMws,
 		exec:      exec,
+		globalSem: globalSem,
 	}
 }
 
@@ -105,8 +118,8 @@ func (g *groupExecutor[C]) Build() error {
 
 			// If the node is a sub-group, create an executor for it and add it as a single node.
 			if subGroup, ok := capturedNode.(*Group[C]); ok {
-				// Create a new executor for the sub-group.
-				subGroupExec := newGroupExecutor(subGroup, subGroup.maxGoNum, subGroup.globalMws...)
+				// Create a new executor for the sub-group, 传递全局信号量
+				subGroupExec := newGroupExecutor(subGroup, g.globalSem, subGroup.globalMws...)
 				if err := subGroupExec.Build(); err != nil {
 					return err
 				}

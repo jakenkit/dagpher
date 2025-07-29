@@ -1,14 +1,17 @@
 package executor
 
+import "golang.org/x/sync/semaphore"
+
 type option struct {
 	maxGoNum int // maximum number of goroutines to run concurrently
+	sem      *semaphore.Weighted
 }
 
 type Option func(*option)
 
 func defaultOption() *option {
 	return &option{
-		maxGoNum: 100, // default to 1 goroutine
+		maxGoNum: 100,
 	}
 }
 
@@ -26,5 +29,11 @@ func WithMaxGoNum(maxGoNum int) Option {
 			panic("maxGoNum must be greater than 0")
 		}
 		o.maxGoNum = maxGoNum
+	}
+}
+
+func WithSem(sem *semaphore.Weighted) Option {
+	return func(o *option) {
+		o.sem = sem
 	}
 }
