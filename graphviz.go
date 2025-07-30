@@ -1,0 +1,437 @@
+package dagpher
+
+import (
+	"bytes"
+	"compress/gzip"
+	"context"
+	"encoding/base64"
+	"fmt"
+	"net/url"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/awalterschulze/gographviz"
+)
+
+const (
+	maxGraphCount           = 1024 // graph 最大数量, 避免全局变量过多
+	maxGraphNodeCount       = 256  // graph 最大节点数量
+	maxOriginGraphUrlLength = 4096 // 原始 graph url 最大长度, 超过压缩
+)
+
+type graphvizKey struct{}
+
+type graphvizBuilder struct {
+	name        string
+	minCostMs   int
+	recordLimit float64
+	costDetail  bool
+}
+
+// newGraphvizBuilder
+// name graph 名称, context 内唯一, 如果重复, 不记录
+func newGraphvizBuilder(name string) *graphvizBuilder {
+	return &graphvizBuilder{
+		name:        name,
+		minCostMs:   0,
+		recordLimit: -1,
+		costDetail:  false,
+	}
+}
+
+// WithLimit 限流 QPS, 默认不限制. 为 0 则不启用中间件, <0 不限制
+// 入口处限流, 先于 WithMinCost
+func (b *graphvizBuilder) WithLimit(limit float64) *graphvizBuilder {
+	b.recordLimit = limit
+	return b
+}
+
+// WithMinCost 打印日志的最小耗时, 默认不限制
+func (b *graphvizBuilder) WithMinCost(minCostMs int) *graphvizBuilder {
+	b.minCostMs = minCostMs
+	return b
+}
+
+// WithTimeDetail
+// 开启耗时详情, 绘制每个节点的起始时间和终止时间, 会导致日志量增加, 默认关闭
+func (b *graphvizBuilder) WithTimeDetail() *graphvizBuilder {
+	b.costDetail = true
+	return b
+}
+
+// Build 返回 ctx 和 Graphviz, 使用返回的 ctx 执行 Node
+func (b *graphvizBuilder) Build(ctx context.Context) (context.Context, *Graphviz) {
+	// 写入 ctx
+	graph := newGraphviz(b.name, b.minCostMs, b.costDetail, true)
+	return context.WithValue(ctx, graphvizKey{}, graph), graph
+}
+
+type graphNode struct {
+	Node   DependencyNode
+	Start  time.Time
+	Finish time.Time
+	Error  error
+}
+
+func newGraphNode(node DependencyNode) *graphNode {
+	return &graphNode{
+		Node: node,
+	}
+}
+
+func (n *graphNode) record(start, finish time.Time, err error) *graphNode {
+	n.Start = start
+	n.Finish = finish
+	n.Error = err
+	return n
+}
+
+type Graphviz struct {
+	name       string
+	minCostMs  int
+	costDetail bool
+	start      time.Time
+	valid      atomic.Bool // 是否有效
+	mu         sync.Mutex
+	nodes      []*graphNode
+	nodeMap    map[DependencyNode]bool
+}
+
+func newGraphviz(name string, minCostMs int, costDetail, valid bool) *Graphviz {
+	g := &Graphviz{
+		name:       name,
+		minCostMs:  minCostMs,
+		costDetail: costDetail,
+		start:      time.Now(),
+		valid:      atomic.Bool{},
+		nodes:      []*graphNode{},
+		nodeMap:    map[DependencyNode]bool{},
+	}
+	g.valid.Store(valid)
+	return g
+}
+
+func (g *Graphviz) record(node DependencyNode, start, finish time.Time, err error) {
+	if !g.valid.Load() {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if len(g.nodes) >= maxGraphNodeCount {
+		g.valid.Store(false)
+		return
+	}
+
+	g.nodes = append(g.nodes, newGraphNode(node).
+		record(start, finish, err))
+	g.nodeMap[node] = true
+}
+
+// Log 日志信息, 可能返回空. 返回空时不使用
+func (g *Graphviz) Log(ctx context.Context) {
+	info := g.GetInfo()
+	if info != "" {
+		// 这里可以根据需要使用不同的日志库
+		fmt.Printf("[Graphviz] %s\n", info)
+	}
+}
+
+// GetInfo 获取图信息
+func (g *Graphviz) GetInfo() string {
+	if !g.valid.Load() {
+		return ""
+	}
+
+	// 过滤耗时
+	totalCostMs := time.Since(g.start).Milliseconds()
+	if totalCostMs < int64(g.minCostMs) {
+		return ""
+	}
+
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	// 节点名
+	var (
+		nodeNames = map[DependencyNode]string{}
+		nameCount = map[string]int{}
+	)
+	for _, node := range g.nodes {
+		var name string
+		if n, ok := nodeNames[node.Node]; ok {
+			name = n
+		} else if count := nameCount[node.Node.Name()]; count > 0 {
+			name = fmt.Sprintf("%v_%v", node.Node.Name(), count)
+			nodeNames[node.Node] = name
+			nameCount[node.Node.Name()]++
+		} else {
+			name = node.Node.Name()
+			nodeNames[node.Node] = name
+			nameCount[node.Node.Name()]++
+		}
+	}
+
+	// 分组
+	groups := g.divideIntoGroups()
+
+	// 绘制
+	graph := gographviz.NewGraph()
+	graphAst, _ := gographviz.Parse([]byte(fmt.Sprintf(`digraph G{rankdir=LR; label="%v %vms";}`,
+		g.name, totalCostMs)))
+	_ = gographviz.Analyse(graphAst, graph)
+
+	// 绘制子图
+	for idx, group := range groups {
+		graphName := fmt.Sprintf("cluster_%v", idx)
+		_ = graph.AddSubGraph("G", graphName, map[string]string{
+			"label": fmt.Sprintf(`"%vms"`, group.MaxFinish.Sub(group.MinStart).Milliseconds()),
+			"style": "solid",
+		})
+
+		longestMap := map[DependencyNode]bool{}
+		for _, node := range group.LongestPath {
+			longestMap[node.Node] = true
+		}
+
+		// 点
+		for _, node := range group.Nodes {
+			var (
+				name = nodeNames[node.Node]
+				attr map[string]string
+			)
+			if node.Error != nil {
+				attr = map[string]string{
+					"label":     fmt.Sprintf(`"%v\nError"`, name),
+					"style":     "filled",
+					"fillcolor": "red",
+				}
+			} else {
+				buildLabel := func(withLongest bool) string {
+					str := fmt.Sprintf(`"%v\n`, name)
+					if withLongest {
+						str += "Longest"
+					}
+					str += fmt.Sprintf(`%vms`, node.Finish.Sub(node.Start).Milliseconds())
+					if g.costDetail {
+						str += fmt.Sprintf("\n[%v,%v]", node.Start.Sub(g.start).Milliseconds(),
+							node.Finish.Sub(g.start).Milliseconds())
+					}
+					str += `"`
+					return str
+				}
+				attr = map[string]string{
+					"label": buildLabel(false),
+					"color": "green",
+				}
+				if longestMap[node.Node] {
+					attr["color"] = "red"
+					if len(longestMap) == 1 {
+						attr["label"] = buildLabel(true)
+					}
+				}
+			}
+			_ = graph.AddNode(graphName, name, attr)
+		}
+
+		// 边
+		markLongestLabel := false
+		for _, node := range group.Nodes {
+			for _, depName := range node.Node.Dependencies() {
+				// 找到对应的依赖节点
+				var depNode DependencyNode
+				for _, n := range g.nodes {
+					if n.Node.Name() == depName {
+						depNode = n.Node
+						break
+					}
+				}
+				if depNode == nil || !g.nodeMap[depNode] {
+					continue
+				}
+				attr := map[string]string{}
+				if longestMap[node.Node] && longestMap[depNode] {
+					attr["color"] = "red"
+					if group.LongestPath[0].Node == depNode && !markLongestLabel {
+						markLongestLabel = true
+						attr["label"] = fmt.Sprintf("Longest%vms", group.LongestCost.Milliseconds())
+					}
+				}
+				_ = graph.AddEdge(nodeNames[depNode], nodeNames[node.Node], true, attr)
+			}
+		}
+
+		// 上一个分组的最后一个节点, 指向当前分组第一个节点
+		if idx > 0 {
+			preNode := groups[idx-1].Last.Node
+			nextNode := group.First.Node
+			if group.LongestPath[0].Start.Sub(group.First.Start) < time.Millisecond*2 {
+				nextNode = group.LongestPath[0].Node
+			}
+			_ = graph.AddEdge(nodeNames[preNode], nodeNames[nextNode], true, map[string]string{
+				"style": "dashed",
+			})
+		}
+	}
+
+	var (
+		path = strings.Join(Map(groups, func(group *graphGroup) string {
+			path := strings.Join(Map(group.LongestPath, func(node *graphNode) string {
+				return nodeNames[node.Node]
+			}), "->")
+			return fmt.Sprintf("[%v(%vms)]", path, group.LongestCost.Milliseconds())
+		}), "")
+		graphUrl = g.compressGraphUrl(fmt.Sprintf("https://dreampuf.github.io/GraphvizOnline/?presentation#%v",
+			url.PathEscape(graph.String())))
+	)
+	return fmt.Sprintf("total cost: %vms, longest path: %v, graph: %v", totalCostMs, path, graphUrl)
+}
+
+// 分组
+type graphGroup struct {
+	Nodes       []*graphNode
+	NodeMap     map[*graphNode]bool
+	First       *graphNode
+	Last        *graphNode
+	MinStart    time.Time
+	MaxFinish   time.Time
+	LongestPath []*graphNode
+	LongestCost time.Duration
+}
+
+func (g *Graphviz) divideIntoGroups() []*graphGroup {
+	// 构建森林
+	var (
+		roots []*graphNode
+		nexts = map[DependencyNode][]*graphNode{}
+	)
+	for _, node := range g.nodes {
+		isRoot := true
+		for _, depName := range node.Node.Dependencies() {
+			// 找到对应的依赖节点
+			for _, n := range g.nodes {
+				if n.Node.Name() == depName {
+					nexts[n.Node] = append(nexts[n.Node], node)
+					if g.nodeMap[n.Node] {
+						isRoot = false
+					}
+					break
+				}
+			}
+		}
+		if isRoot {
+			roots = append(roots, node)
+		}
+	}
+
+	// 分组
+	var groups []*graphGroup
+	visited := map[*graphNode]bool{}
+	for _, root := range roots {
+		if visited[root] {
+			continue
+		}
+		group := &graphGroup{
+			Nodes:   []*graphNode{},
+			NodeMap: map[*graphNode]bool{},
+		}
+		g.dfsGroup(root, group, nexts, visited)
+		if len(group.Nodes) > 0 {
+			groups = append(groups, group)
+		}
+	}
+
+	// 计算每组的统计信息
+	for _, group := range groups {
+		group.First = group.Nodes[0]
+		group.Last = group.Nodes[len(group.Nodes)-1]
+		group.MinStart = group.First.Start
+		group.MaxFinish = group.Last.Finish
+
+		for _, node := range group.Nodes {
+			if node.Start.Before(group.MinStart) {
+				group.MinStart = node.Start
+			}
+			if node.Finish.After(group.MaxFinish) {
+				group.MaxFinish = node.Finish
+			}
+		}
+
+		// 计算最长路径
+		group.LongestPath, group.LongestCost = g.calculateLongestPath(group)
+	}
+
+	return groups
+}
+
+func (g *Graphviz) dfsGroup(node *graphNode, group *graphGroup, nexts map[DependencyNode][]*graphNode, visited map[*graphNode]bool) {
+	if visited[node] {
+		return
+	}
+	visited[node] = true
+	group.Nodes = append(group.Nodes, node)
+	group.NodeMap[node] = true
+
+	for _, next := range nexts[node.Node] {
+		g.dfsGroup(next, group, nexts, visited)
+	}
+}
+
+func (g *Graphviz) calculateLongestPath(group *graphGroup) ([]*graphNode, time.Duration) {
+	// 简化实现：返回第一个节点作为最长路径
+	if len(group.Nodes) == 0 {
+		return nil, 0
+	}
+
+	longest := group.Nodes[0]
+	maxDuration := longest.Finish.Sub(longest.Start)
+
+	for _, node := range group.Nodes {
+		duration := node.Finish.Sub(node.Start)
+		if duration > maxDuration {
+			maxDuration = duration
+			longest = node
+		}
+	}
+
+	return []*graphNode{longest}, maxDuration
+}
+
+func (g *Graphviz) compressGraphUrl(originUrl string) string {
+	if len(originUrl) <= maxOriginGraphUrlLength {
+		return originUrl
+	}
+
+	var buf bytes.Buffer
+	writer := gzip.NewWriter(&buf)
+	_, _ = writer.Write([]byte(originUrl))
+	_ = writer.Close()
+
+	compressed := base64.StdEncoding.EncodeToString(buf.Bytes())
+	return fmt.Sprintf("compressed: %s", compressed)
+}
+
+// GraphvizMW 返回 graphviz 中间件
+func GraphvizMW() Middleware {
+	return func(node DependencyNode, next Endpoint) Endpoint {
+		return func(ctx context.Context, req any) (any, error) {
+			// 从 context 中获取 graphviz 实例
+			graphviz, ok := ctx.Value(graphvizKey{}).(*Graphviz)
+			if !ok || graphviz == nil {
+				// 如果没有 graphviz 实例，直接执行下一个中间件
+				return next(ctx, req)
+			}
+
+			start := time.Now()
+			resp, err := next(ctx, req)
+			finish := time.Now()
+
+			// 记录节点执行信息
+			graphviz.record(node, start, finish, err)
+
+			return resp, err
+		}
+	}
+}

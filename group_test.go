@@ -11,8 +11,9 @@ import (
 )
 
 type TestContext struct {
-	mu  sync.Mutex
-	log []string
+	mu             sync.Mutex
+	log            []string
+	executionOrder []string
 }
 
 func (c *TestContext) Log(msg string) {
@@ -27,6 +28,12 @@ func (c *TestContext) GetLog() []string {
 	logCopy := make([]string, len(c.log))
 	copy(logCopy, c.log)
 	return logCopy
+}
+
+func (c *TestContext) AddExecution(name string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.executionOrder = append(c.executionOrder, name)
 }
 
 func TestGroupExecution(t *testing.T) {
@@ -124,7 +131,7 @@ func TestGroupExecution(t *testing.T) {
 		testCtx := &TestContext{}
 		group := NewGroup[*TestContext]("test_group")
 
-		mw1 := func(next Endpoint) Endpoint {
+		mw1 := func(node DependencyNode, next Endpoint) Endpoint {
 			return func(ctx context.Context, req any) (any, error) {
 				testCtx.Log("global mw1 start")
 				res, err := next(ctx, req)
@@ -132,7 +139,7 @@ func TestGroupExecution(t *testing.T) {
 				return res, err
 			}
 		}
-		mw2 := func(next Endpoint) Endpoint {
+		mw2 := func(node DependencyNode, next Endpoint) Endpoint {
 			return func(ctx context.Context, req any) (any, error) {
 				testCtx.Log("node mw2 start")
 				res, err := next(ctx, req)

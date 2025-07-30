@@ -11,7 +11,6 @@ import (
 
 type Group[C any] struct {
 	name        string
-	maxGoNum    int
 	deps        []string
 	globalMws   []Middleware
 	nodeMap     map[string]Node[C]
@@ -45,11 +44,15 @@ func (g *Group[C]) AddMiddleware(mws ...Middleware) *Group[C] {
 }
 
 func (g *Group[C]) SetMaxGoNum(maxGoNum int) *Group[C] {
-	g.maxGoNum = maxGoNum
+	g.globalSem = semaphore.NewWeighted(int64(maxGoNum))
 	return g
 }
 
 func (g *Group[C]) SetGlobalSem(sem *semaphore.Weighted) *Group[C] {
+	if g.globalSem != nil { // 优先用当前group的
+		return g
+	}
+
 	g.globalSem = sem
 	return g
 }
@@ -79,7 +82,6 @@ func (g *Group[C]) Name() string {
 }
 
 type groupExecutor[C any] struct {
-	maxGoNum  int64
 	group     *Group[C]
 	globalMws []Middleware
 	exec      *executor.Engine[C]
@@ -119,7 +121,15 @@ func (g *groupExecutor[C]) Build() error {
 			// If the node is a sub-group, create an executor for it and add it as a single node.
 			if subGroup, ok := capturedNode.(*Group[C]); ok {
 				// Create a new executor for the sub-group, 传递全局信号量
-				subGroupExec := newGroupExecutor(subGroup, g.globalSem, subGroup.globalMws...)
+				subGroup.globalMws = append(subGroup.globalMws, g.globalMws...)
+
+				var semToUse *semaphore.Weighted
+				if subGroup.globalSem != nil {
+					semToUse = subGroup.globalSem
+				} else {
+					semToUse = g.globalSem
+				}
+				subGroupExec := newGroupExecutor(subGroup, semToUse, subGroup.globalMws...)
 				if err := subGroupExec.Build(); err != nil {
 					return err
 				}
@@ -137,7 +147,7 @@ func (g *groupExecutor[C]) Build() error {
 				mws := opt.mergeMws(g.globalMws)
 
 				execNode := func(ctx context.Context, c C) error {
-					_, err := Chain(mws...)(func(ctx context.Context, in any) (out any, err error) {
+					_, err := ChainMw(mws...)(node, func(ctx context.Context, in any) (out any, err error) {
 						realIn, ok := in.(C)
 						if !ok {
 							return nil, fmt.Errorf("expected input type %T, got %T", c, in)

@@ -1,10 +1,16 @@
 package dagpher
 
-import "context"
+import (
+	"context"
+)
+
+type DependencyNode interface {
+	Name() string
+	Dependencies() []string
+}
 
 type Node[C any] interface {
-	Name() string           // name, global unique
-	Dependencies() []string // dependencies name
+	DependencyNode
 	Exec(context.Context, C) error
 }
 
@@ -20,6 +26,10 @@ func (q *quickNode[C]) Dependencies() []string {
 
 // Exec implements Node.
 func (q *quickNode[C]) Exec(ctx context.Context, c C) error {
+	//fmt.Printf("start time: %v, start exec node: %s, exec ctx: %v\n", time.Since(now).Milliseconds(), q.name, c)
+	//defer func() {
+	//	fmt.Printf("end time: %v, end exec node: %s, exec ctx: %v\n", time.Since(now).Milliseconds(), q.name, c)
+	//}()
 	return q.exec(ctx, c)
 }
 

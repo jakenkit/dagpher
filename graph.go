@@ -32,12 +32,14 @@ func (g *Graph[C]) SetMaxGoNum(maxGoNum int) *Graph[C] {
 	} else {
 		g.globalSem = nil
 	}
+	g.group.SetGlobalSem(g.globalSem)
 
 	return g
 }
 
 func (g *Graph[C]) AddGlobalMW(mws ...Middleware) *Graph[C] {
 	g.globalMws = append(g.globalMws, mws...)
+	g.group.AddMiddleware(mws...)
 	return g
 }
 
@@ -50,7 +52,6 @@ func (g *Graph[C]) Build() error {
 		g.globalSem = semaphore.NewWeighted(int64(g.maxGoNum))
 	}
 
-	g.group.SetMaxGoNum(g.maxGoNum)
 	g.group.AddMiddleware(g.globalMws...)
 	g.group.SetGlobalSem(g.globalSem)
 
