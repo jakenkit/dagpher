@@ -74,11 +74,18 @@ func (g *Group[C]) Exec(ctx context.Context, execCtx C) error {
 		}
 	}
 
+	// 在执行组时添加容器路径信息
+	ctx = withContainerPath(ctx, g.name)
 	return g.groupExec.Execute(ctx, execCtx)
 }
 
 func (g *Group[C]) Name() string {
 	return g.name
+}
+
+// IsGroup 实现 GroupNode 接口
+func (g *Group[C]) IsGroup() bool {
+	return true
 }
 
 type groupExecutor[C any] struct {
@@ -134,10 +141,17 @@ func (g *groupExecutor[C]) Build() error {
 					return err
 				}
 
+				// 创建子组执行函数，在执行时添加容器路径
+				subGroupExecuteFunc := func(ctx context.Context, c C) error {
+					// 在执行子组时添加容器路径信息
+					ctx = withContainerPath(ctx, subGroup.name)
+					return subGroupExec.Execute(ctx, c)
+				}
+
 				// Add the sub-group as a single node to the parent executor.
 				// 注意：这里使用AddNode而不是AddLeafNode，因为subGroup不是叶子节点
 				// subGroup的执行不消耗信号量，因为其内部的叶子节点会消耗信号量
-				err := g.exec.AddContainerNode(capturedName, subGroupExec.Execute, capturedNode.Dependencies()...)
+				err := g.exec.AddContainerNode(capturedName, subGroupExecuteFunc, capturedNode.Dependencies()...)
 				if err != nil {
 					return err
 				}

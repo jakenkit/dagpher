@@ -56,6 +56,11 @@ func (c *Chain[C]) Name() string {
 	return c.name
 }
 
+// IsGroup 实现 GroupNode 接口
+func (c *Chain[C]) IsGroup() bool {
+	return true
+}
+
 // Dependencies returns empty slice as chain doesn't have explicit dependencies
 func (c *Chain[C]) Dependencies() []string {
 	return []string{}
@@ -76,7 +81,7 @@ func (c *Chain[C]) Build() error {
 			}
 		}
 	}
-	
+
 	c.built = true
 	return nil
 }
@@ -88,6 +93,9 @@ func (c *Chain[C]) Exec(ctx context.Context, execCtx C) error {
 			return err
 		}
 	}
+
+	// 在执行链时添加容器路径信息
+	ctx = withContainerPath(ctx, c.name)
 
 	for _, node := range c.nodes {
 		if err := c.wrapWithSemaphore(func(ctx context.Context, ec C) error {
@@ -118,6 +126,7 @@ func (c *Chain[C]) wrapWithSemaphore(exec func(context.Context, C) error) func(c
 // executeNodeWithMiddleware executes a single node with middleware applied
 func (c *Chain[C]) executeNode(ctx context.Context, execCtx C, node Node[C]) error {
 	if subGroup, ok := node.(*Group[C]); ok {
+		// 子组执行时会在其内部添加容器路径，这里不需要额外处理
 		return subGroup.Exec(ctx, execCtx)
 	}
 

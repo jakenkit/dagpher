@@ -176,3 +176,189 @@ func TestGraphvizWithErrors(t *testing.T) {
 		fmt.Printf("Error graph info: %s\n", info)
 	}
 }
+
+func TestGraphvizWithGroupDependencies(t *testing.T) {
+	ctx := context.Background()
+
+	// 创建 graphviz 实例
+	ctx, graph := newGraphvizBuilder("GroupDependencyTest").Build(ctx)
+	defer graph.Log(ctx)
+
+	// 创建第一个组
+	group1 := NewGroup[string]("database_group")
+	group1.AddMiddleware(GraphvizMW())
+
+	nodeA := NewNode("InitDB", func(ctx context.Context, c string) error {
+		time.Sleep(100 * time.Millisecond)
+		return nil
+	})
+
+	nodeB := NewNode("MigrateDB", func(ctx context.Context, c string) error {
+		time.Sleep(80 * time.Millisecond)
+		return nil
+	}, "InitDB")
+
+	group1.AddNode(nodeA)
+	group1.AddNode(nodeB)
+
+	// 创建第二个组，依赖第一个组
+	group2 := NewGroup[string]("service_group", "database_group")
+	group2.AddMiddleware(GraphvizMW())
+
+	nodeC := NewNode("StartService", func(ctx context.Context, c string) error {
+		time.Sleep(120 * time.Millisecond)
+		return nil
+	})
+
+	nodeD := NewNode("RegisterService", func(ctx context.Context, c string) error {
+		time.Sleep(50 * time.Millisecond)
+		return nil
+	}, "StartService")
+
+	group2.AddNode(nodeC)
+	group2.AddNode(nodeD)
+
+	// 创建第三个组，依赖第二个组
+	group3 := NewGroup[string]("monitor_group", "service_group")
+	group3.AddMiddleware(GraphvizMW())
+
+	nodeE := NewNode("StartMonitor", func(ctx context.Context, c string) error {
+		time.Sleep(60 * time.Millisecond)
+		return nil
+	})
+
+	group3.AddNode(nodeE)
+
+	// 构建并执行
+	err := group1.Build()
+	if err != nil {
+		t.Fatalf("Failed to build group1: %v", err)
+	}
+
+	err = group2.Build()
+	if err != nil {
+		t.Fatalf("Failed to build group2: %v", err)
+	}
+
+	err = group3.Build()
+	if err != nil {
+		t.Fatalf("Failed to build group3: %v", err)
+	}
+
+	// 按顺序执行
+	err = group1.Exec(ctx, "test")
+	if err != nil {
+		t.Fatalf("Failed to execute group1: %v", err)
+	}
+
+	err = group2.Exec(ctx, "test")
+	if err != nil {
+		t.Fatalf("Failed to execute group2: %v", err)
+	}
+
+	err = group3.Exec(ctx, "test")
+	if err != nil {
+		t.Fatalf("Failed to execute group3: %v", err)
+	}
+
+	// 输出图信息 - 应该能看到组间的依赖关系
+	info := graph.GetInfo()
+	if info != "" {
+		fmt.Printf("Group dependencies graph info: %s\n", info)
+	}
+}
+
+func TestGraphvizWithNestedGroups(t *testing.T) {
+	ctx := context.Background()
+
+	// 创建 graphviz 实例
+	ctx, graph := newGraphvizBuilder("NestedGroupTest").WithMinCost(50).Build(ctx)
+	defer graph.Log(ctx)
+
+	// 创建内层组
+	innerGroup := NewGroup[string]("inner_group")
+	innerGroup.AddMiddleware(GraphvizMW())
+
+	nodeA := NewNode("NodeA", func(ctx context.Context, c string) error {
+		time.Sleep(100 * time.Millisecond)
+		return nil
+	})
+
+	nodeB := NewNode("NodeB", func(ctx context.Context, c string) error {
+		time.Sleep(150 * time.Millisecond)
+		return nil
+	}, "NodeA")
+
+	innerGroup.AddNode(nodeA)
+	innerGroup.AddNode(nodeB)
+
+	// 创建外层组
+	outerGroup := NewGroup[string]("outer_group")
+	outerGroup.AddMiddleware(GraphvizMW())
+
+	nodeC := NewNode("NodeC", func(ctx context.Context, c string) error {
+		time.Sleep(80 * time.Millisecond)
+		return nil
+	})
+
+	nodeD := NewNode("NodeD", func(ctx context.Context, c string) error {
+		time.Sleep(120 * time.Millisecond)
+		return nil
+	}, "NodeC")
+
+	// 将内层组作为节点添加到外层组
+	outerGroup.AddNode(innerGroup)
+	outerGroup.AddNode(nodeC)
+	outerGroup.AddNode(nodeD)
+
+	// 构建并执行组
+	err := outerGroup.Build()
+	if err != nil {
+		t.Fatalf("Failed to build outer group: %v", err)
+	}
+
+	err = outerGroup.Exec(ctx, "test")
+	if err != nil {
+		t.Fatalf("Failed to execute outer group: %v", err)
+	}
+
+	// 输出图信息
+	info := graph.GetInfo()
+	if info != "" {
+		fmt.Printf("Nested groups graph info: %s\n", info)
+	}
+}
+
+func TestGraphvizWithSingleNode(t *testing.T) {
+	ctx := context.Background()
+
+	// 创建 graphviz 实例
+	ctx, graph := newGraphvizBuilder("SingleNodeTest").Build(ctx)
+	defer graph.Log(ctx)
+
+	// 创建单个节点（这是你提到的会被单独框出来的情况）
+	singleNode := NewNode("SingleNode", func(ctx context.Context, c int) error {
+		time.Sleep(100 * time.Millisecond)
+		return nil
+	})
+
+	group := NewGroup[int]("single_group")
+	group.AddMiddleware(GraphvizMW())
+	group.AddNode(singleNode)
+
+	err := group.Build()
+	if err != nil {
+		t.Fatalf("Failed to build group: %v", err)
+	}
+
+	err = group.Exec(ctx, 42)
+	if err != nil {
+		t.Fatalf("Failed to execute group: %v", err)
+	}
+
+	// 输出图信息 - 现在单个节点不会被单独框出来，因为它属于 single_group
+	info := graph.GetInfo()
+	if info != "" {
+		fmt.Printf("Single node graph info: %s\n", info)
+	}
+}
