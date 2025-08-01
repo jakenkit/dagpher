@@ -7,7 +7,7 @@ import (
 )
 
 const (
-	DefaultGraphName = "dagpher_graph"
+	DefaultGraphName = "graph"
 )
 
 type Graph[C any] struct {

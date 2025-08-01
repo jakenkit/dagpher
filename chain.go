@@ -7,6 +7,10 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
+const (
+	DefaultChainName = "chain"
+)
+
 // Chain represents a sequential executor that executes nodes in append order
 type Chain[C any] struct {
 	name      string
@@ -17,9 +21,9 @@ type Chain[C any] struct {
 }
 
 // NewChain creates a new chain executor
-func NewChain[C any](name string) *Chain[C] {
+func NewChain[C any]() *Chain[C] {
 	return &Chain[C]{
-		name:  name,
+		name:  DefaultChainName,
 		nodes: make([]Node[C], 0),
 	}
 }
@@ -76,7 +80,7 @@ func (c *Chain[C]) Build() error {
 			}
 		}
 	}
-	
+
 	c.built = true
 	return nil
 }
