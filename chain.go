@@ -7,6 +7,10 @@ import (
 	"golang.org/x/sync/semaphore"
 )
 
+const (
+	DefaultChainName = "chain"
+)
+
 // Chain represents a sequential executor that executes nodes in append order
 type Chain[C any] struct {
 	name      string
@@ -17,9 +21,9 @@ type Chain[C any] struct {
 }
 
 // NewChain creates a new chain executor
-func NewChain[C any](name string) *Chain[C] {
+func NewChain[C any]() *Chain[C] {
 	return &Chain[C]{
-		name:  name,
+		name:  DefaultChainName,
 		nodes: make([]Node[C], 0),
 	}
 }
@@ -76,7 +80,7 @@ func (c *Chain[C]) Build() error {
 			}
 		}
 	}
-	
+
 	c.built = true
 	return nil
 }
@@ -88,6 +92,8 @@ func (c *Chain[C]) Exec(ctx context.Context, execCtx C) error {
 			return err
 		}
 	}
+	
+	ctx = withContainerPath(ctx, c.name)
 
 	for _, node := range c.nodes {
 		if err := c.wrapWithSemaphore(func(ctx context.Context, ec C) error {
@@ -118,6 +124,7 @@ func (c *Chain[C]) wrapWithSemaphore(exec func(context.Context, C) error) func(c
 // executeNodeWithMiddleware executes a single node with middleware applied
 func (c *Chain[C]) executeNode(ctx context.Context, execCtx C, node Node[C]) error {
 	if subGroup, ok := node.(*Group[C]); ok {
+		// 子组执行时会在其内部添加容器路径，这里不需要额外处理
 		return subGroup.Exec(ctx, execCtx)
 	}
 

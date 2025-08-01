@@ -2,6 +2,8 @@ package dagpher
 
 import (
 	"context"
+	"fmt"
+	"time"
 )
 
 type DependencyNode interface {
@@ -24,12 +26,14 @@ func (q *quickNode[C]) Dependencies() []string {
 	return q.deps
 }
 
+var now = time.Now()
+
 // Exec implements Node.
 func (q *quickNode[C]) Exec(ctx context.Context, c C) error {
-	//fmt.Printf("start time: %v, start exec node: %s, exec ctx: %v\n", time.Since(now).Milliseconds(), q.name, c)
-	//defer func() {
-	//	fmt.Printf("end time: %v, end exec node: %s, exec ctx: %v\n", time.Since(now).Milliseconds(), q.name, c)
-	//}()
+	fmt.Printf("start time: %v, start exec node: %s, exec ctx: %v\n", time.Since(now).Milliseconds(), q.name, c)
+	defer func() {
+		fmt.Printf("end time: %v, end exec node: %s, exec ctx: %v\n", time.Since(now).Milliseconds(), q.name, c)
+	}()
 	return q.exec(ctx, c)
 }
 

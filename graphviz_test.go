@@ -69,6 +69,67 @@ func TestGraphvizMiddleware(t *testing.T) {
 	}
 }
 
+func TestGraphvizWithNestedGroups(t *testing.T) {
+	ctx := context.Background()
+
+	// 创建 graphviz 实例
+	ctx, graph := newGraphvizBuilder("NestedGroupTest").WithMinCost(50).Build(ctx)
+	defer graph.Log(ctx)
+
+	// 创建内层组
+	innerGroup := NewGroup[string]("inner_group")
+	innerGroup.AddMiddleware(GraphvizMW())
+
+	nodeA := NewNode("NodeA", func(ctx context.Context, c string) error {
+		time.Sleep(100 * time.Millisecond)
+		return nil
+	})
+
+	nodeB := NewNode("NodeB", func(ctx context.Context, c string) error {
+		time.Sleep(150 * time.Millisecond)
+		return nil
+	}, "NodeA")
+
+	innerGroup.AddNode(nodeA)
+	innerGroup.AddNode(nodeB)
+
+	// 创建外层组
+	outerGroup := NewGroup[string]("outer_group")
+	outerGroup.AddMiddleware(GraphvizMW())
+
+	nodeC := NewNode("NodeC", func(ctx context.Context, c string) error {
+		time.Sleep(80 * time.Millisecond)
+		return nil
+	})
+
+	nodeD := NewNode("NodeD", func(ctx context.Context, c string) error {
+		time.Sleep(120 * time.Millisecond)
+		return nil
+	}, "NodeC")
+
+	// 将内层组作为节点添加到外层组
+	outerGroup.AddNode(innerGroup)
+	outerGroup.AddNode(nodeC)
+	outerGroup.AddNode(nodeD)
+
+	// 构建并执行组
+	err := outerGroup.Build()
+	if err != nil {
+		t.Fatalf("Failed to build outer group: %v", err)
+	}
+
+	err = outerGroup.Exec(ctx, "test")
+	if err != nil {
+		t.Fatalf("Failed to execute outer group: %v", err)
+	}
+
+	// 输出图信息
+	info := graph.GetInfo()
+	if info != "" {
+		fmt.Printf("Nested groups graph info: %s\n", info)
+	}
+}
+
 func TestGraphvizWithMultipleGroups(t *testing.T) {
 	ctx := context.Background()
 
@@ -174,5 +235,39 @@ func TestGraphvizWithErrors(t *testing.T) {
 	info := graph.GetInfo()
 	if info != "" {
 		fmt.Printf("Error graph info: %s\n", info)
+	}
+}
+
+func TestGraphvizWithSingleNode(t *testing.T) {
+	ctx := context.Background()
+
+	// 创建 graphviz 实例
+	ctx, graph := newGraphvizBuilder("SingleNodeTest").Build(ctx)
+	defer graph.Log(ctx)
+
+	// 创建单个节点（这是你提到的会被单独框出来的情况）
+	singleNode := NewNode("SingleNode", func(ctx context.Context, c int) error {
+		time.Sleep(100 * time.Millisecond)
+		return nil
+	})
+
+	group := NewGroup[int]("single_group")
+	group.AddMiddleware(GraphvizMW())
+	group.AddNode(singleNode)
+
+	err := group.Build()
+	if err != nil {
+		t.Fatalf("Failed to build group: %v", err)
+	}
+
+	err = group.Exec(ctx, 42)
+	if err != nil {
+		t.Fatalf("Failed to execute group: %v", err)
+	}
+
+	// 输出图信息 - 现在单个节点不会被单独框出来，因为它属于 single_group
+	info := graph.GetInfo()
+	if info != "" {
+		fmt.Printf("Single node graph info: %s\n", info)
 	}
 }

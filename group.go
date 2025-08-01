@@ -3,6 +3,7 @@ package dagpher
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"golang.org/x/sync/semaphore"
 
@@ -74,6 +75,7 @@ func (g *Group[C]) Exec(ctx context.Context, execCtx C) error {
 		}
 	}
 
+	ctx = withContainerPath(ctx, g.name)
 	return g.groupExec.Execute(ctx, execCtx)
 }
 
@@ -134,10 +136,17 @@ func (g *groupExecutor[C]) Build() error {
 					return err
 				}
 
+				// 创建子组执行函数，在执行时添加容器路径
+				subGroupExecuteFunc := func(ctx context.Context, c C) error {
+					// 在执行子组时添加容器路径信息
+					ctx = withContainerPath(ctx, subGroup.name)
+					return subGroupExec.Execute(ctx, c)
+				}
+
 				// Add the sub-group as a single node to the parent executor.
 				// 注意：这里使用AddNode而不是AddLeafNode，因为subGroup不是叶子节点
 				// subGroup的执行不消耗信号量，因为其内部的叶子节点会消耗信号量
-				err := g.exec.AddContainerNode(capturedName, subGroupExec.Execute, capturedNode.Dependencies()...)
+				err := g.exec.AddContainerNode(capturedName, subGroupExecuteFunc, capturedNode.Dependencies()...)
 				if err != nil {
 					return err
 				}
@@ -189,4 +198,48 @@ func (g *groupExecutor[C]) Execute(ctx context.Context, execCtx C) error {
 	}
 
 	return g.exec.Execute(ctx, execCtx)
+}
+
+// contextKey 用于在 context 中传递容器路径信息
+type containerPathKey struct{}
+
+type containerPath struct {
+	path []string // 从最外层到当前层的容器名称路径
+}
+
+func (cp *containerPath) getFullName(nodeName string) string {
+	if len(cp.path) <= 1 { // 最顶层或只有一层，不添加前缀
+		return nodeName
+	}
+	// 跳过最顶层，从第二层开始构建前缀
+	prefix := strings.Join(cp.path[1:], ".")
+	return fmt.Sprintf("%s.%s", prefix, nodeName)
+}
+
+func (cp *containerPath) getCurrentContainer() string {
+	if len(cp.path) == 0 {
+		return ""
+	}
+	return cp.path[len(cp.path)-1]
+}
+
+// withContainerPath 在 context 中添加容器路径信息
+func withContainerPath(ctx context.Context, containerName string) context.Context {
+	if currentPath, ok := ctx.Value(containerPathKey{}).(*containerPath); ok {
+		newPath := &containerPath{
+			path: append(currentPath.path, containerName),
+		}
+		return context.WithValue(ctx, containerPathKey{}, newPath)
+	}
+	return context.WithValue(ctx, containerPathKey{}, &containerPath{
+		path: []string{containerName},
+	})
+}
+
+// getContainerPath 从 context 中获取容器路径信息
+func getContainerPath(ctx context.Context) *containerPath {
+	if path, ok := ctx.Value(containerPathKey{}).(*containerPath); ok {
+		return path
+	}
+	return &containerPath{path: []string{}}
 }
