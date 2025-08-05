@@ -16,6 +16,9 @@ type Group[C any] struct {
 	nodeMap     map[string]Node[C]
 	nodeOptions map[string]*option
 
+	parentNamespace string // The namespace path from parent groups (empty for top-level)
+	isTopLevel      bool   // True if this group is a top-level container (Graph/Chain)
+
 	globalSem *semaphore.Weighted
 	groupExec *groupExecutor[C]
 }
@@ -45,6 +48,26 @@ func (g *Group[C]) AddMiddleware(mws ...Middleware) *Group[C] {
 
 func (g *Group[C]) SetMaxGoNum(maxGoNum int) *Group[C] {
 	g.globalSem = semaphore.NewWeighted(int64(maxGoNum))
+	return g
+}
+
+// setParentNamespace sets the parent namespace for this group
+func (g *Group[C]) setParentNamespace(namespace string) *Group[C] {
+	g.parentNamespace = namespace
+	return g
+}
+
+// getFullName returns the full namespaced name of this group
+func (g *Group[C]) getFullName() string {
+	if g.parentNamespace == "" {
+		return g.name
+	}
+	return g.parentNamespace + "." + g.name
+}
+
+// setTopLevel marks this group as a top-level container (Graph/Chain)
+func (g *Group[C]) setTopLevel(isTopLevel bool) *Group[C] {
+	g.isTopLevel = isTopLevel
 	return g
 }
 
@@ -120,6 +143,15 @@ func (g *groupExecutor[C]) Build() error {
 
 			// If the node is a sub-group, create an executor for it and add it as a single node.
 			if subGroup, ok := capturedNode.(*Group[C]); ok {
+				// Set the namespace for the sub-group
+				// Only set namespace if current group has a namespace (not top-level)
+				if group.parentNamespace != "" {
+					subGroup.setParentNamespace(group.getFullName())
+				} else {
+					// Current group is top-level, so sub-group's namespace is just the current group name
+					subGroup.setParentNamespace(group.name)
+				}
+
 				// Create a new executor for the sub-group, 传递全局信号量
 				subGroup.globalMws = append(subGroup.globalMws, g.globalMws...)
 
@@ -134,9 +166,8 @@ func (g *groupExecutor[C]) Build() error {
 					return err
 				}
 
-				// Add the sub-group as a single node to the parent executor.
-				// 注意：这里使用AddNode而不是AddLeafNode，因为subGroup不是叶子节点
-				// subGroup的执行不消耗信号量，因为其内部的叶子节点会消耗信号量
+				// Use the original name for sub-group registration (no namespace prefix for groups)
+				// The namespace is handled internally within the sub-group
 				err := g.exec.AddContainerNode(capturedName, subGroupExec.Execute, capturedNode.Dependencies()...)
 				if err != nil {
 					return err
@@ -165,10 +196,23 @@ func (g *groupExecutor[C]) Build() error {
 					return nil
 				}
 
-				// 使用AddLeafNode为叶子节点添加信号量控制
-				// 只有真正执行业务逻辑的叶子节点才会消耗信号量
-				err := g.exec.AddNode(capturedName, execNode, capturedNode.Dependencies()...)
-				if err != nil {
+				// Generate the namespaced name for the node
+				// Top-level containers (Graph/Chain) don't add namespace prefix to their direct nodes
+				nodeNameInExecutor := capturedName
+				if !group.isTopLevel {
+					// This is not a top-level container, add namespace prefix
+					if group.parentNamespace != "" {
+						// This group has a parent namespace, use full namespaced name
+						nodeNameInExecutor = group.getFullName() + "." + capturedName
+					} else {
+						// This group is the first level below top-level, use group name as namespace
+						nodeNameInExecutor = group.name + "." + capturedName
+					}
+				}
+				// For top-level containers, use original node name without namespace prefix
+
+				// Register node with the determined name
+				if err := g.exec.AddNode(nodeNameInExecutor, execNode, capturedNode.Dependencies()...); err != nil {
 					return err
 				}
 			}

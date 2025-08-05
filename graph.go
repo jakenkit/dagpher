@@ -19,8 +19,10 @@ type Graph[C any] struct {
 }
 
 func NewGraph[C any]() *Graph[C] {
+	group := NewGroup[C](DefaultGraphName)
+	group.setTopLevel(true) // Mark as top-level container
 	return &Graph[C]{
-		group: NewGroup[C](DefaultGraphName),
+		group: group,
 	}
 }
 

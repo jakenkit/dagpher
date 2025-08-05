@@ -15,10 +15,11 @@ const (
 
 // Chain represents a sequential executor that executes nodes in append order
 type Chain[C any] struct {
-	name      string
-	built     bool
-	nodes     []Node[C]
-	globalMws []Middleware
+	name       string
+	built      bool
+	nodes      []Node[C]
+	globalMws  []Middleware
+	isTopLevel bool // True to indicate this is a top-level container
 
 	globalSem *semaphore.Weighted
 	chainExec *chainExecutor[C]
@@ -27,8 +28,9 @@ type Chain[C any] struct {
 // NewChain creates a new chain executor
 func NewChain[C any]() *Chain[C] {
 	return &Chain[C]{
-		name:  DefaultChainName,
-		nodes: make([]Node[C], 0),
+		name:       DefaultChainName,
+		nodes:      make([]Node[C], 0),
+		isTopLevel: true, // Mark as top-level container
 	}
 }
 
@@ -144,6 +146,11 @@ func (ce *chainExecutor[C]) Build() error {
 
 		// If the node is a sub-group, create an executor for it
 		if subGroup, ok := capturedNode.(*Group[C]); ok {
+			// Since Chain is a top-level container, set namespace for sub-groups
+			// Sub-groups under Chain should use the group name as namespace
+			subGroup.setParentNamespace("") // Clear any existing parent namespace
+			// Don't mark sub-group as top-level since it's contained within Chain
+
 			// Add global middlewares to sub-group
 			subGroup.globalMws = append(subGroup.globalMws, ce.globalMws...)
 
