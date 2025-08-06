@@ -14,7 +14,7 @@ func TestChainBasicExecution(t *testing.T) {
 	testCtx := &TestContext{}
 
 	// Create chain
-	chain := NewChain[*TestContext]("test-chain")
+	chain := NewChain[*TestContext]()
 
 	// Add nodes in order
 	chain.AddNode(NewNode("node1", func(ctx context.Context, c *TestContext) error {
@@ -68,12 +68,12 @@ func TestChainWithGroups(t *testing.T) {
 	}))
 
 	// Create chain with mixed nodes and groups
-	chain := NewChain[*TestContext]("mixed-chain")
+	chain := NewChain[*TestContext]()
 	chain.AddNode(NewNode("before-group", func(ctx context.Context, c *TestContext) error {
 		c.AddExecution("before-group")
 		return nil
 	})).
-		AddNode(group).
+		AddNode(group.AsNode()).
 		AddNode(NewNode("after-group", func(ctx context.Context, c *TestContext) error {
 			c.AddExecution("after-group")
 			return nil
@@ -129,7 +129,7 @@ func TestChainWithMiddleware(t *testing.T) {
 	}
 
 	// Create chain with middleware
-	chain := NewChain[*TestContext]("mw-chain")
+	chain := NewChain[*TestContext]()
 	chain.AddGlobalMW(prefixMW()).
 		AddNode(NewNode("test-node", func(ctx context.Context, c *TestContext) error {
 			c.AddExecution("test-node")
@@ -163,7 +163,7 @@ func TestChainConcurrencyControl(t *testing.T) {
 	testCtx := &TestContext{}
 
 	// Create chain with maxGoNum=1 (serial execution)
-	chain := NewChain[*TestContext]("serial-chain")
+	chain := NewChain[*TestContext]()
 	chain.SetMaxGoNum(1)
 
 	// Add nodes with delays to test serialization
@@ -204,7 +204,7 @@ func TestChainErrorHandling(t *testing.T) {
 	testCtx := &TestContext{}
 
 	// Create chain with a failing node
-	chain := NewChain[*TestContext]("error-chain")
+	chain := NewChain[*TestContext]()
 	chain.AddNode(NewNode("node1", func(ctx context.Context, c *TestContext) error {
 		c.AddExecution("node1")
 		return nil
@@ -246,7 +246,7 @@ func TestChainPipeline(t *testing.T) {
 
 	Convey("serial pipeline", t, func() {
 		A, B, C, D, E := NewCalcNodes(Param{SetDep: false}) // Dependencies are ignored in chain
-		chain := NewChain[*Tuple2]("serial-pipeline").SetMaxGoNum(1)
+		chain := NewChain[*Tuple2]().SetMaxGoNum(1)
 
 		chain.AddNode(A)
 		chain.AddNode(B)
@@ -272,7 +272,7 @@ func TestChainPipeline(t *testing.T) {
 
 	Convey("parallel pipeline with group", t, func() {
 		A, B, C, D, E := NewCalcNodes(Param{SetDep: false}) // Dependencies needed for group
-		chain := NewChain[*Tuple2]("parallel-pipeline")
+		chain := NewChain[*Tuple2]()
 
 		// Group B and C to run in parallel
 		groupBC := NewGroup[*Tuple2]("group-bc")
@@ -284,7 +284,7 @@ func TestChainPipeline(t *testing.T) {
 		// To make the chain valid, we need to ensure dependencies are met.
 		// A -> groupBC(B,C) -> E -> D is a valid sequence.
 		chain.AddNode(A)
-		chain.AddNode(groupBC)
+		chain.AddNode(groupBC.AsNode())
 		chain.AddNode(E)
 		chain.AddNode(D)
 

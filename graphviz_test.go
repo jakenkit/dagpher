@@ -51,13 +51,7 @@ func TestGraphvizMiddleware(t *testing.T) {
 	group.AddNode(nodeD)
 	group.AddNode(nodeE)
 
-	// 构建并执行
-	err := group.Build()
-	if err != nil {
-		t.Fatalf("Failed to build group: %v", err)
-	}
-
-	err = group.Exec(ctx, 42)
+	err := group.AsNode().Exec(ctx, 42)
 	if err != nil {
 		t.Fatalf("Failed to execute group: %v", err)
 	}
@@ -110,23 +104,12 @@ func TestGraphvizWithMultipleGroups(t *testing.T) {
 	group2.AddNode(nodeC)
 	group2.AddNode(nodeD)
 
-	// 构建并执行组
-	err := group1.Build()
-	if err != nil {
-		t.Fatalf("Failed to build group1: %v", err)
-	}
-
-	err = group2.Build()
-	if err != nil {
-		t.Fatalf("Failed to build group2: %v", err)
-	}
-
-	err = group1.Exec(ctx, "test")
+	err := group1.AsNode().Exec(ctx, "test")
 	if err != nil {
 		t.Fatalf("Failed to execute group1: %v", err)
 	}
 
-	err = group2.Exec(ctx, "test")
+	err = group2.AsNode().Exec(ctx, "test")
 	if err != nil {
 		t.Fatalf("Failed to execute group2: %v", err)
 	}
@@ -162,13 +145,8 @@ func TestGraphvizWithErrors(t *testing.T) {
 	group.AddNode(errorNode)
 	group.AddNode(successNode)
 
-	err := group.Build()
-	if err != nil {
-		t.Fatalf("Failed to build group: %v", err)
-	}
-
 	// 执行会有错误，但仍然会记录到 graphviz
-	_ = group.Exec(ctx, 42)
+	_ = group.AsNode().Exec(ctx, 42)
 
 	// 输出图信息
 	info := graph.GetInfo()

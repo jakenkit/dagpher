@@ -40,7 +40,7 @@ func (e *Engine[C]) AddNode(name string, exec func(context.Context, C) error, de
 		return errors.New("node already exists: " + name)
 	}
 
-	wrappedExec := e.wrapWithSemaphore(exec)
+	wrappedExec := WrapWithSemaphore(e.opt.sem, exec)
 	e.nodeExec[name] = wrappedExec
 	e.nodeStat[name] = &nodeStat{
 		done: make(chan struct{}),
@@ -56,13 +56,14 @@ func (e *Engine[C]) AddNode(name string, exec func(context.Context, C) error, de
 	return nil
 }
 
-// AddContainerNode 添加节点但不使用信号量控制（用于Group等容器节点）
+// AddContainerNode adds a container node that doesn't use semaphore control.
+// This is used for Group and other container nodes that manage their own concurrency.
 func (e *Engine[C]) AddContainerNode(name string, exec func(context.Context, C) error, deps ...string) error {
 	if _, exists := e.nodeExec[name]; exists {
 		return errors.New("node already exists: " + name)
 	}
 
-	// 直接使用原始执行函数，不包装信号量
+	// Use the original execution function directly, without semaphore wrapping
 	e.nodeExec[name] = exec
 	e.nodeStat[name] = &nodeStat{
 		done: make(chan struct{}),
@@ -76,22 +77,6 @@ func (e *Engine[C]) AddContainerNode(name string, exec func(context.Context, C) 
 		e.nodeToNext[dep] = append(e.nodeToNext[dep], name)
 	}
 	return nil
-}
-
-// wrapWithSemaphore use semaphore to wrap func
-func (e *Engine[C]) wrapWithSemaphore(exec func(context.Context, C) error) func(context.Context, C) error {
-	return func(ctx context.Context, c C) error {
-		if e.opt.sem == nil {
-			return exec(ctx, c)
-		}
-
-		if err := e.opt.sem.Acquire(ctx, 1); err != nil {
-			return err
-		}
-		defer e.opt.sem.Release(1)
-
-		return exec(ctx, c)
-	}
 }
 
 func (e *Engine[C]) detectCycle() error {

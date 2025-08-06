@@ -100,7 +100,7 @@ func TestGroupExecution(t *testing.T) {
 		subGroup1 := NewGroup[*TestContext]("subgroup1", "A")
 		subGroup1.AddNode(nodeB)
 
-		rootGroup.AddNode(subGroup1)
+		rootGroup.AddNode(subGroup1.AsNode())
 		rootGroup.AddNode(nodeC)
 
 		sem := semaphore.NewWeighted(1)
@@ -120,7 +120,7 @@ func TestGroupExecution(t *testing.T) {
 
 		rootGroup.AddNode(nodeA1)
 		subGroup.AddNode(nodeA2)
-		rootGroup.AddNode(subGroup)
+		rootGroup.AddNode(subGroup.AsNode())
 
 		sem := semaphore.NewWeighted(1)
 		executor := newGroupExecutor(rootGroup, sem)

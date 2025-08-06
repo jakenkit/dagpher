@@ -1,3 +1,5 @@
+// Package dagpher provides sequential execution capabilities.
+// This file contains the Chain type for executing nodes in strict sequential order.
 package dagpher
 
 import (
@@ -5,6 +7,8 @@ import (
 	"fmt"
 
 	"golang.org/x/sync/semaphore"
+
+	"github.com/jakenier/dagpher/executor"
 )
 
 const (
@@ -28,7 +32,8 @@ func NewChain[C any]() *Chain[C] {
 	}
 }
 
-// AddNode adds a node to the chain (can be Node or Group)
+// AddNode adds a node to the chain for sequential execution.
+// Unlike Group, Chain allows duplicate node names since execution is purely sequential.
 func (c *Chain[C]) AddNode(node Node[C]) *Chain[C] {
 	c.nodes = append(c.nodes, node)
 	return c
@@ -68,7 +73,8 @@ func (c *Chain[C]) Dependencies() []string {
 // Build prepares the chain for execution
 func (c *Chain[C]) Build() error {
 	for _, node := range c.nodes {
-		if subGroup, ok := node.(*Group[C]); ok {
+		if adapter, ok := node.(*GroupNodeAdapter[C]); ok {
+			subGroup := adapter.group
 			if subGroup.globalSem == nil && c.globalSem != nil {
 				subGroup.SetGlobalSem(c.globalSem)
 			}
@@ -76,7 +82,7 @@ func (c *Chain[C]) Build() error {
 			subGroup.AddMiddleware(c.globalMws...)
 
 			if err := subGroup.Build(); err != nil {
-				return fmt.Errorf("failed to build sub-group %s: %w", subGroup.Name(), err)
+				return fmt.Errorf("failed to build sub-group %s: %w", adapter.Name(), err)
 			}
 		}
 	}
@@ -103,40 +109,16 @@ func (c *Chain[C]) Exec(ctx context.Context, execCtx C) error {
 	return nil
 }
 
-// wrapWithSemaphore use semaphore to wrap func
+// wrapWithSemaphore wraps an execution function with semaphore control.
 func (c *Chain[C]) wrapWithSemaphore(exec func(context.Context, C) error) func(context.Context, C) error {
-	return func(ctx context.Context, ec C) error {
-		if c.globalSem == nil {
-			return exec(ctx, ec)
-		}
-
-		if err := c.globalSem.Acquire(ctx, 1); err != nil {
-			return err
-		}
-		defer c.globalSem.Release(1)
-
-		return exec(ctx, ec)
-	}
+	return executor.WrapWithSemaphore(c.globalSem, exec)
 }
 
-// executeNodeWithMiddleware executes a single node with middleware applied
+// executeNode executes a single node with middleware applied
 func (c *Chain[C]) executeNode(ctx context.Context, execCtx C, node Node[C]) error {
-	if subGroup, ok := node.(*Group[C]); ok {
-		return subGroup.Exec(ctx, execCtx)
+	if adapter, ok := node.(*GroupNodeAdapter[C]); ok {
+		return adapter.group.Exec(ctx, execCtx)
 	}
 
-	_, err := ChainMw(c.globalMws...)(node, func(ctx context.Context, in any) (out any, err error) {
-		realIn, ok := in.(C)
-		if !ok {
-			return nil, fmt.Errorf("expected input type %T, got %T", execCtx, in)
-		}
-
-		err = node.Exec(ctx, realIn)
-		if err != nil {
-			return nil, err
-		}
-		return realIn, nil
-	})(ctx, execCtx)
-
-	return err
+	return ExecuteWithMiddleware(c.globalMws, node, ctx, execCtx)
 }

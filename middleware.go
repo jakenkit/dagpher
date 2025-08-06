@@ -1,3 +1,5 @@
+// Package dagpher provides middleware management and execution utilities for DAG execution.
+// This file contains middleware chain processing and execution helpers.
 package dagpher
 
 import (
@@ -18,6 +20,24 @@ func ChainMw(middlewares ...Middleware) Middleware {
 		}
 		return next
 	}
+}
+
+// ExecuteWithMiddleware executes a node with middleware chain applied.
+// This is a utility function to avoid code duplication in group and chain execution.
+func ExecuteWithMiddleware[C any](middlewares []Middleware, node Node[C], ctx context.Context, c C) error {
+	_, err := ChainMw(middlewares...)(node, func(ctx context.Context, in any) (out any, err error) {
+		realIn, ok := in.(C)
+		if !ok {
+			return nil, fmt.Errorf("expected input type %T, got %T", c, in)
+		}
+
+		err = node.Exec(ctx, realIn)
+		if err != nil {
+			return nil, err
+		}
+		return realIn, nil
+	})(ctx, c)
+	return err
 }
 
 func TimeoutMW(timeout time.Duration) Middleware {

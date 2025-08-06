@@ -229,10 +229,10 @@ func TestGraph(t *testing.T) {
 		g4.AddNode(D)
 		g4.AddNode(E) // (4681, 6711801)
 
-		graph.AddNode(g1)
-		graph.AddNode(g2)
-		graph.AddNode(g3)
-		g3.AddNode(g4)
+		graph.AddNode(g1.AsNode())
+		graph.AddNode(g2.AsNode())
+		graph.AddNode(g3.AsNode())
+		g3.AddNode(g4.AsNode())
 
 		ctx, graphviz := newGraphvizBuilder("flow").Build(ctx)
 		defer graphviz.Log(ctx)
@@ -405,8 +405,8 @@ func TestGlobalSemaphore(t *testing.T) {
 
 			graph := NewGraph[*Tuple2]()
 			graph.SetMaxGoNum(2) // Global limit of 2
-			graph.AddNode(group1)
-			graph.AddNode(group2)
+			graph.AddNode(group1.AsNode())
+			graph.AddNode(group2.AsNode())
 
 			err := graph.Build()
 			So(err, ShouldBeNil)
@@ -515,7 +515,8 @@ func TestGroupExec(t *testing.T) {
 			}
 		)
 
-		g1 := NewGroup[*Tuple2]("group1").SetMaxGoNum(10)
+		g1 := NewGroup[*Tuple2]("group1")
+		g1.SetMaxGoNum(10)
 		A, B, C, D, E := NewCalcNodes(Param{SetDep: true, SetName: 1})
 		g1.AddNode(A)
 		g1.AddNode(B)
@@ -526,7 +527,8 @@ func TestGroupExec(t *testing.T) {
 		// ((Second + 3) * 5 * 7) + 13
 		// 330
 
-		g2 := NewGroup[*Tuple2]("group2", "group1").SetMaxGoNum(1)
+		g2 := NewGroup[*Tuple2]("group2", "group1")
+		g2.SetMaxGoNum(1)
 		A, B, C, D, E = NewCalcNodes(Param{SetDep: true, SetName: 2})
 		g2.AddNode(A)
 		g2.AddNode(B)
@@ -534,7 +536,8 @@ func TestGroupExec(t *testing.T) {
 		g2.AddNode(D)
 		g2.AddNode(E) // (181, 5473)
 
-		g3 := NewGroup[*Tuple2]("group3", "group2").SetMaxGoNum(10)
+		g3 := NewGroup[*Tuple2]("group3", "group2")
+		g3.SetMaxGoNum(10)
 		A, B, C, D, E = NewCalcNodes(Param{SetDep: true, SetName: 3})
 		g3.AddNode(A)
 		g3.AddNode(B)
@@ -550,10 +553,10 @@ func TestGroupExec(t *testing.T) {
 		g4.AddNode(D)
 		g4.AddNode(E) // (4681, 6711801)
 
-		graph.AddNode(g1)
-		graph.AddNode(g2)
-		graph.AddNode(g3)
-		g3.AddNode(g4)
+		graph.AddNode(g1.AsNode())
+		graph.AddNode(g2.AsNode())
+		graph.AddNode(g3.AsNode())
+		g3.AddNode(g4.AsNode())
 
 		ctx, graphviz := newGraphvizBuilder("flow").Build(ctx)
 		defer graphviz.Log(ctx)

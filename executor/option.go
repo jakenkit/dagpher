@@ -1,6 +1,9 @@
 package executor
 
-import "golang.org/x/sync/semaphore"
+import (
+	"fmt"
+	"golang.org/x/sync/semaphore"
+)
 
 type option struct {
 	maxGoNum int // maximum number of goroutines to run concurrently
@@ -23,10 +26,12 @@ func getOption(opts ...Option) *option {
 	return opt
 }
 
+// WithMaxGoNum sets the maximum number of concurrent goroutines.
+// Panics if maxGoNum is not positive, as this indicates a programming error.
 func WithMaxGoNum(maxGoNum int) Option {
 	return func(o *option) {
 		if maxGoNum <= 0 {
-			panic("maxGoNum must be greater than 0")
+			panic(fmt.Sprintf("WithMaxGoNum: maxGoNum must be greater than 0, got %d", maxGoNum))
 		}
 		o.maxGoNum = maxGoNum
 	}

@@ -1,3 +1,5 @@
+// Package dagpher provides high-level DAG execution interfaces.
+// This file contains the Graph type which provides a simple interface for DAG execution.
 package dagpher
 
 import (
@@ -43,6 +45,8 @@ func (g *Graph[C]) AddGlobalMW(mws ...Middleware) *Graph[C] {
 	return g
 }
 
+// AddNode adds a node to the graph.
+// Returns an error if a node with the same name already exists.
 func (g *Graph[C]) AddNode(node Node[C], opts ...Option) {
 	g.group.AddNode(node, opts...)
 }

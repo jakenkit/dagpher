@@ -1,23 +1,71 @@
+// Package dagpher provides group management and hierarchical DAG execution.
+// This file contains the Group type which allows organizing nodes into hierarchical containers.
 package dagpher
 
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"golang.org/x/sync/semaphore"
 
 	"github.com/jakenier/dagpher/executor"
 )
 
+// NodeContainer defines the interface for managing nodes within a container.
+// It provides methods for adding nodes, configuring middleware, and controlling concurrency.
+type NodeContainer[C any] interface {
+	AddNode(Node[C], ...Option) error
+	AddMiddleware(...Middleware) NodeContainer[C]
+	SetMaxGoNum(int) NodeContainer[C]
+	SetGlobalSem(*semaphore.Weighted) NodeContainer[C]
+}
+
+// GroupNodeAdapter adapts a Group to implement the Node interface
+// It's a lightweight adapter that delegates to the group for actual execution
+type GroupNodeAdapter[C any] struct {
+	name  string
+	deps  []string
+	group *Group[C]
+}
+
+// Name implements DependencyNode interface
+func (a *GroupNodeAdapter[C]) Name() string {
+	return a.name
+}
+
+// Dependencies implements DependencyNode interface
+func (a *GroupNodeAdapter[C]) Dependencies() []string {
+	return a.deps
+}
+
+// Build builds the execution graph for this group node
+// Delegates to the underlying group
+func (a *GroupNodeAdapter[C]) Build() error {
+	return a.group.Build()
+}
+
+// Exec implements Node interface by delegating to the group
+func (a *GroupNodeAdapter[C]) Exec(ctx context.Context, c C) error {
+	return a.group.Exec(ctx, c)
+}
+
+// Group manages a collection of nodes as a container
 type Group[C any] struct {
-	name        string
-	deps        []string
-	globalMws   []Middleware
+	// Node identity (needed for AsNode functionality)
+	name string
+	deps []string
+
+	// Container management fields
 	nodeMap     map[string]Node[C]
 	nodeOptions map[string]*option
+	globalMws   []Middleware
+	globalSem   *semaphore.Weighted
 
-	globalSem *semaphore.Weighted
+	// Execution state (shared by all adapters)
 	groupExec *groupExecutor[C]
+	buildOnce sync.Once
+	buildErr  error
 }
 
 func NewGroup[C any](name string, deps ...string) *Group[C] {
@@ -29,56 +77,82 @@ func NewGroup[C any](name string, deps ...string) *Group[C] {
 	}
 }
 
+// AddNode implements NodeContainer interface.
+// Returns an error if a node with the same name already exists.
 func (g *Group[C]) AddNode(node Node[C], opts ...Option) {
 	if _, exists := g.nodeMap[node.Name()]; exists {
-		panic("node with the same name already exists: " + node.Name())
+		g.buildErr = fmt.Errorf("node with name '%s' already exists in group '%s'", node.Name(), g.name)
+		return
 	}
 
 	g.nodeMap[node.Name()] = node
 	g.nodeOptions[node.Name()] = getOption(opts...)
+	return
 }
 
+// AddGroup is a convenience method to add another group as a node.
+// Returns an error if the group cannot be added.
+func (g *Group[C]) AddGroup(subGroup *Group[C], opts ...Option) {
+	g.AddNode(subGroup.AsNode(), opts...)
+}
+
+// AddMiddleware implements NodeContainer interface
 func (g *Group[C]) AddMiddleware(mws ...Middleware) *Group[C] {
 	g.globalMws = append(g.globalMws, mws...)
 	return g
 }
 
+// SetMaxGoNum implements NodeContainer interface
 func (g *Group[C]) SetMaxGoNum(maxGoNum int) *Group[C] {
 	g.globalSem = semaphore.NewWeighted(int64(maxGoNum))
 	return g
 }
 
+// SetGlobalSem implements NodeContainer interface
 func (g *Group[C]) SetGlobalSem(sem *semaphore.Weighted) *Group[C] {
-	if g.globalSem != nil { // 优先用当前group的
-		return g
+	if g.globalSem != nil {
+		return g // current group's semaphore takes priority
 	}
 
 	g.globalSem = sem
 	return g
 }
 
-func (g *Group[C]) Dependencies() []string {
-	return g.deps
-}
-
-func (g *Group[C]) Build() error {
-	g.groupExec = newGroupExecutor(g, g.globalSem, g.globalMws...)
-	return g.groupExec.Build()
-}
-
-func (g *Group[C]) Exec(ctx context.Context, execCtx C) error {
-	if g.groupExec == nil {
-		err := g.Build()
-		if err != nil {
-			return err
-		}
+// ensureBuilt ensures the group executor is built exactly once in a thread-safe manner
+func (g *Group[C]) ensureBuilt() error {
+	if g.buildErr != nil {
+		return g.buildErr
 	}
+	g.buildOnce.Do(func() {
+		g.groupExec = newGroupExecutor(g, g.globalSem, g.globalMws...)
+		g.buildErr = g.groupExec.Build()
+	})
+	return g.buildErr
+}
 
+// Build builds the execution graph for this group
+// This method is idempotent and thread-safe
+func (g *Group[C]) Build() error {
+	return g.ensureBuilt()
+}
+
+// Exec executes the group's internal DAG
+func (g *Group[C]) Exec(ctx context.Context, execCtx C) error {
+	if err := g.ensureBuilt(); err != nil {
+		return fmt.Errorf("failed to build group %s: %w", g.name, err)
+	}
 	return g.groupExec.Execute(ctx, execCtx)
 }
 
-func (g *Group[C]) Name() string {
-	return g.name
+// AsNode returns the Node interface for this group
+// Creates a new adapter instance each time to avoid circular references
+// All adapters share the same build state through the group
+func (g *Group[C]) AsNode() Node[C] {
+	return &GroupNodeAdapter[C]{
+		name:  g.name,
+		deps:  g.deps,
+		group: g,
+	}
 }
 
 type groupExecutor[C any] struct {
@@ -118,9 +192,10 @@ func (g *groupExecutor[C]) Build() error {
 			capturedNode := node
 			capturedName := name
 
-			// If the node is a sub-group, create an executor for it and add it as a single node.
-			if subGroup, ok := capturedNode.(*Group[C]); ok {
-				// Create a new executor for the sub-group, 传递全局信号量
+			// If the node is a GroupNodeAdapter, extract the underlying group
+			if adapter, ok := capturedNode.(*GroupNodeAdapter[C]); ok {
+				subGroup := adapter.group
+				// Create a new executor for the sub-group, propagate global middleware
 				subGroup.globalMws = append(subGroup.globalMws, g.globalMws...)
 
 				var semToUse *semaphore.Weighted
@@ -134,39 +209,23 @@ func (g *groupExecutor[C]) Build() error {
 					return err
 				}
 
-				// Add the sub-group as a single node to the parent executor.
-				// 注意：这里使用AddNode而不是AddLeafNode，因为subGroup不是叶子节点
-				// subGroup的执行不消耗信号量，因为其内部的叶子节点会消耗信号量
+				// Add the sub-group as a container node to the parent executor
+				// Container nodes don't consume semaphore slots as their internal nodes will
 				err := g.exec.AddContainerNode(capturedName, subGroupExec.Execute, capturedNode.Dependencies()...)
 				if err != nil {
 					return err
 				}
 			} else {
-				// This is a regular node (叶子节点).
+				// This is a regular leaf node
 				opt := group.nodeOptions[capturedName]
 				mws := opt.mergeMws(g.globalMws)
 
 				execNode := func(ctx context.Context, c C) error {
-					_, err := ChainMw(mws...)(node, func(ctx context.Context, in any) (out any, err error) {
-						realIn, ok := in.(C)
-						if !ok {
-							return nil, fmt.Errorf("expected input type %T, got %T", c, in)
-						}
-
-						err = capturedNode.Exec(ctx, realIn)
-						if err != nil {
-							return nil, err
-						}
-						return realIn, nil
-					})(ctx, c)
-					if err != nil {
-						return err
-					}
-					return nil
+					return ExecuteWithMiddleware(mws, capturedNode, ctx, c)
 				}
 
-				// 使用AddLeafNode为叶子节点添加信号量控制
-				// 只有真正执行业务逻辑的叶子节点才会消耗信号量
+				// Add leaf node with semaphore control
+				// Only actual business logic nodes consume semaphore slots
 				err := g.exec.AddNode(capturedName, execNode, capturedNode.Dependencies()...)
 				if err != nil {
 					return err
