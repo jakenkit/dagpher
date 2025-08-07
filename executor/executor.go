@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -16,6 +17,8 @@ var (
 
 // Engine is the main structure for managing nodes and their execution for DAG execution.
 type Engine[C any] struct {
+	// Protect concurrent access to graph structure during execution
+	mu         sync.RWMutex
 	rootNode   []string
 	nodeToNext map[string][]string
 	nodeStat   map[string]*nodeStat
@@ -36,6 +39,9 @@ func NewEngine[C any](opts ...Option) *Engine[C] {
 }
 
 func (e *Engine[C]) AddNode(name string, exec func(context.Context, C) error, deps ...string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	if _, exists := e.nodeExec[name]; exists {
 		return errors.New("node already exists: " + name)
 	}
@@ -59,6 +65,9 @@ func (e *Engine[C]) AddNode(name string, exec func(context.Context, C) error, de
 // AddContainerNode adds a container node that doesn't use semaphore control.
 // This is used for Group and other container nodes that manage their own concurrency.
 func (e *Engine[C]) AddContainerNode(name string, exec func(context.Context, C) error, deps ...string) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	if _, exists := e.nodeExec[name]; exists {
 		return errors.New("node already exists: " + name)
 	}
@@ -118,6 +127,9 @@ func (e *Engine[C]) detectCycle() error {
 }
 
 func (e *Engine[C]) Build() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	// Check that all mentioned dependencies exist as nodes.
 	for dep, dependents := range e.nodeToNext {
 		if _, exists := e.nodeExec[dep]; !exists {
@@ -164,18 +176,35 @@ func (e *Engine[C]) Build() error {
 }
 
 func (e *Engine[C]) Execute(ctx context.Context, c C) error {
+	e.mu.RLock()
+	rootNodesCopy := make([]string, len(e.rootNode))
+	copy(rootNodesCopy, e.rootNode)
+	e.mu.RUnlock()
+
 	eg, gCtx := errgroup.WithContext(ctx)
 	if e.opt.sem == nil && e.opt.maxGoNum > 0 {
 		eg.SetLimit(e.opt.maxGoNum)
 	}
 
-	for _, name := range e.rootNode {
+	for _, name := range rootNodesCopy {
 		nodeToRun := name // Capture loop variable to prevent race condition.
 		eg.Go(func() error {
 			return e.executeNode(gCtx, nodeToRun, c, eg)
 		})
 	}
-	return eg.Wait()
+	
+	err := eg.Wait()
+	
+	// Ensure all node completion channels are closed on cancellation
+	if ctx.Err() != nil {
+		e.mu.RLock()
+		for _, stat := range e.nodeStat {
+			stat.Done() // This is safe due to sync.Once
+		}
+		e.mu.RUnlock()
+	}
+	
+	return err
 }
 
 func (e *Engine[C]) executeNode(ctx context.Context, name string, c C, eg *errgroup.Group) error {
@@ -184,14 +213,18 @@ func (e *Engine[C]) executeNode(ctx context.Context, name string, c C, eg *errgr
 	}
 
 	start := time.Now()
+	
+	e.mu.RLock()
 	stat := e.nodeStat[name]
+	execFunc := e.nodeExec[name]
+	e.mu.RUnlock()
 
 	defer func() {
 		stat.Done()
 		stat.cost = int32(time.Since(start).Milliseconds())
 	}()
 
-	if err := e.nodeExec[name](ctx, c); err != nil {
+	if err := execFunc(ctx, c); err != nil {
 		stat.err.Store(err)
 		return err
 	}
@@ -200,8 +233,15 @@ func (e *Engine[C]) executeNode(ctx context.Context, name string, c C, eg *errgr
 		return err
 	}
 
-	for _, next := range e.nodeToNext[name] {
+	e.mu.RLock()
+	nextNodes := e.nodeToNext[name]
+	e.mu.RUnlock()
+
+	for _, next := range nextNodes {
+		e.mu.RLock()
 		nextStat := e.nodeStat[next]
+		e.mu.RUnlock()
+		
 		if nextStat == nil {
 			continue // Should not happen with a successful Build()
 		}

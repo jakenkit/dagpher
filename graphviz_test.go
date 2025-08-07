@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	. "github.com/smartystreets/goconvey/convey"
 )
 
 func TestGraphvizMiddleware(t *testing.T) {
@@ -153,4 +155,75 @@ func TestGraphvizWithErrors(t *testing.T) {
 	if info != "" {
 		fmt.Printf("Error graph info: %s\n", info)
 	}
+}
+
+func TestGroupExec(t *testing.T) {
+	ctx := context.TODO()
+	Convey("group", t, func() {
+		var (
+			graph  = NewGraph[*Tuple2]()
+			exeCtx = &Tuple2{
+				First:  1,
+				Second: 1,
+			}
+		)
+
+		g1 := NewGroup[*Tuple2]("group1")
+		g1.SetMaxGoNum(10)
+		A, B, C, D, E := NewCalcNodes(Param{SetDep: true, SetName: 1})
+		g1.AddNode(A)
+		g1.AddNode(B)
+		g1.AddNode(C)
+		g1.AddNode(D)
+		g1.AddNode(E) // (31,153)
+		// ((First + 3) * 5) + 11
+		// ((Second + 3) * 5 * 7) + 13
+		// 330
+
+		g2 := NewGroup[*Tuple2]("group2", "group1")
+		g2.SetMaxGoNum(1)
+		A, B, C, D, E = NewCalcNodes(Param{SetDep: true, SetName: 2})
+		g2.AddNode(A)
+		g2.AddNode(B)
+		g2.AddNode(C)
+		g2.AddNode(D)
+		g2.AddNode(E) // (181, 5473)
+
+		g3 := NewGroup[*Tuple2]("group3", "group2")
+		g3.SetMaxGoNum(10)
+		A, B, C, D, E = NewCalcNodes(Param{SetDep: true, SetName: 3})
+		g3.AddNode(A)
+		g3.AddNode(B)
+		g3.AddNode(C)
+		g3.AddNode(D)
+		g3.AddNode(E) // (931,191673)
+
+		g4 := NewGroup[*Tuple2]("group4")
+		A, B, C, D, E = NewCalcNodes(Param{SetDep: true, SetName: 4})
+		g4.AddNode(A)
+		g4.AddNode(B)
+		g4.AddNode(C)
+		g4.AddNode(D)
+		g4.AddNode(E) // (4681, 6711801)
+
+		g3.AddNode(g4.AsNode())
+
+		graph.AddNode(g1.AsNode())
+		graph.AddNode(g2.AsNode())
+		graph.AddNode(g3.AsNode())
+
+		ctx, graphviz := newGraphvizBuilder("flow").Build(ctx)
+		defer graphviz.Log(ctx)
+		graph.AddGlobalMW(GraphvizMW())
+		//graph.AddGlobalMW(LoggerMW())
+
+		now := time.Now()
+		err := graph.Exec(ctx, exeCtx)
+		So(err, ShouldBeNil)
+		So(exeCtx.First, ShouldEqual, 4697) // 这里因为存在并发，不是4681
+		So(exeCtx.Second, ShouldEqual, 6711801)
+		cost := time.Since(now)
+		So(cost, ShouldBeGreaterThanOrEqualTo, time.Millisecond*1450)
+		So(cost, ShouldBeLessThan, time.Millisecond*1459)
+	})
 }

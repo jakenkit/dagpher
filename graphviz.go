@@ -228,7 +228,9 @@ func (g *Graphviz) GetInfo() string {
 				}
 				if longestMap[node.Node] {
 					attr["color"] = "red"
-					if len(longestMap) == 1 {
+					attr["style"] = "filled"
+					attr["fillcolor"] = "lightcoral"
+					if len(group.LongestPath) == 1 {
 						attr["label"] = buildLabel(true)
 					}
 				}
@@ -302,11 +304,12 @@ type graphGroup struct {
 }
 
 func (g *Graphviz) divideIntoGroups() []*graphGroup {
-	// 构建森林
+	// 构建依赖关系图
 	var (
 		roots []*graphNode
 		nexts = map[DependencyNode][]*graphNode{}
 	)
+	
 	for _, node := range g.nodes {
 		isRoot := true
 		for _, depName := range node.Node.Dependencies() {
@@ -326,9 +329,11 @@ func (g *Graphviz) divideIntoGroups() []*graphGroup {
 		}
 	}
 
-	// 分组
+	// 使用连通分量算法进行分组
 	var groups []*graphGroup
 	visited := map[*graphNode]bool{}
+	
+	// 对每个根节点进行DFS遍历，形成连通分量
 	for _, root := range roots {
 		if visited[root] {
 			continue
@@ -343,8 +348,33 @@ func (g *Graphviz) divideIntoGroups() []*graphGroup {
 		}
 	}
 
+	// 处理可能遗漏的孤立节点
+	for _, node := range g.nodes {
+		if !visited[node] {
+			group := &graphGroup{
+				Nodes:   []*graphNode{node},
+				NodeMap: map[*graphNode]bool{node: true},
+			}
+			groups = append(groups, group)
+		}
+	}
+
 	// 计算每组的统计信息
 	for _, group := range groups {
+		if len(group.Nodes) == 0 {
+			continue
+		}
+		
+		// 按时间排序节点
+		// 简单排序：按开始时间排序
+		for i := 0; i < len(group.Nodes)-1; i++ {
+			for j := i + 1; j < len(group.Nodes); j++ {
+				if group.Nodes[i].Start.After(group.Nodes[j].Start) {
+					group.Nodes[i], group.Nodes[j] = group.Nodes[j], group.Nodes[i]
+				}
+			}
+		}
+		
 		group.First = group.Nodes[0]
 		group.Last = group.Nodes[len(group.Nodes)-1]
 		group.MinStart = group.First.Start
@@ -380,23 +410,70 @@ func (g *Graphviz) dfsGroup(node *graphNode, group *graphGroup, nexts map[Depend
 }
 
 func (g *Graphviz) calculateLongestPath(group *graphGroup) ([]*graphNode, time.Duration) {
-	// 简化实现：返回第一个节点作为最长路径
 	if len(group.Nodes) == 0 {
 		return nil, 0
 	}
 
-	longest := group.Nodes[0]
-	maxDuration := longest.Finish.Sub(longest.Start)
+	// 构建节点映射和依赖关系
+	nodeMap := make(map[string]*graphNode)
+	for _, node := range group.Nodes {
+		nodeMap[node.Node.Name()] = node
+	}
+
+	type pathResult struct {
+		path     []*graphNode
+		duration time.Duration
+	}
+	// 使用动态规划计算从每个节点开始的最长路径
+	memo := make(map[*graphNode]*pathResult)
+
+	var dfs func(*graphNode) *pathResult
+	dfs = func(node *graphNode) *pathResult {
+		if result, exists := memo[node]; exists {
+			return result
+		}
+
+		// 基础路径就是当前节点
+		currentDuration := node.Finish.Sub(node.Start)
+		bestPath := []*graphNode{node}
+		maxTotalDuration := currentDuration
+
+		// 查找所有依赖当前节点的后续节点
+		for _, candidate := range group.Nodes {
+			for _, depName := range candidate.Node.Dependencies() {
+				if depName == node.Node.Name() {
+					// candidate 依赖 node，递归计算 candidate 的最长路径
+					subResult := dfs(candidate)
+					totalDuration := currentDuration + subResult.duration
+					if totalDuration > maxTotalDuration {
+						maxTotalDuration = totalDuration
+						bestPath = append([]*graphNode{node}, subResult.path...)
+					}
+				}
+			}
+		}
+
+		result := &pathResult{
+			path:     bestPath,
+			duration: maxTotalDuration,
+		}
+		memo[node] = result
+		return result
+	}
+
+	// 找到全局最长路径
+	var globalLongestPath []*graphNode
+	var globalMaxDuration time.Duration
 
 	for _, node := range group.Nodes {
-		duration := node.Finish.Sub(node.Start)
-		if duration > maxDuration {
-			maxDuration = duration
-			longest = node
+		result := dfs(node)
+		if result.duration > globalMaxDuration {
+			globalMaxDuration = result.duration
+			globalLongestPath = result.path
 		}
 	}
 
-	return []*graphNode{longest}, maxDuration
+	return globalLongestPath, globalMaxDuration
 }
 
 func (g *Graphviz) compressGraphUrl(originUrl string) string {

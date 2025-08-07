@@ -1,12 +1,16 @@
 package executor
 
-import "sync/atomic"
+import (
+	"sync"
+	"sync/atomic"
+)
 
 type nodeStat struct {
-	err    atomic.Value
-	cost   int32 // cost in milliseconds
-	degree int32
-	done   chan struct{}
+	err      atomic.Value
+	cost     int32 // cost in milliseconds
+	degree   int32
+	done     chan struct{}
+	doneOnce sync.Once
 }
 
 func (n *nodeStat) SetErr(err error) {
@@ -23,5 +27,11 @@ func (n *nodeStat) GetErr() error {
 }
 
 func (n *nodeStat) Done() {
-	close(n.done)
+	n.doneOnce.Do(func() {
+		close(n.done)
+	})
+}
+
+func (n *nodeStat) Wait() {
+	<-n.done
 }
