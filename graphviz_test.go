@@ -157,6 +157,92 @@ func TestGraphvizWithErrors(t *testing.T) {
 	}
 }
 
+func TestGraphvizWithConcurrencyLimit(t *testing.T) {
+	ctx := context.Background()
+
+	// 创建 graphviz 实例
+	ctx, graph := newGraphvizBuilder("ConcurrencyLimitTest").WithTimeDetail().Build(ctx)
+	defer graph.Log(ctx)
+
+	// 创建测试节点 - 设计一个场景：同时有3个节点可以执行，但MaxGoNum=2
+	// A (无依赖，50ms)
+	// B (无依赖，100ms)
+	// C (无依赖，80ms)
+	// D (依赖A，60ms)
+	// E (依赖B和C，40ms)
+	//
+	// 期望的执行序列：
+	// 1. A和B同时开始 (2个goroutine)
+	// 2. A完成后，C开始 (因为还有C在等待)
+	// 3. B和C完成后，D和E可以开始
+
+	nodeA := NewNode("A", func(ctx context.Context, c int) error {
+		time.Sleep(50 * time.Millisecond)
+		return nil
+	})
+
+	nodeB := NewNode("B", func(ctx context.Context, c int) error {
+		time.Sleep(100 * time.Millisecond)
+		return nil
+	})
+
+	nodeC := NewNode("C", func(ctx context.Context, c int) error {
+		time.Sleep(80 * time.Millisecond)
+		return nil
+	})
+
+	nodeD := NewNode("D", func(ctx context.Context, c int) error {
+		time.Sleep(60 * time.Millisecond)
+		return nil
+	}, "A")
+
+	nodeE := NewNode("E", func(ctx context.Context, c int) error {
+		time.Sleep(40 * time.Millisecond)
+		return nil
+	}, "B", "C")
+
+	// 创建 Group 并设置并发限制为2
+	group := NewGroup[int]("concurrency_test")
+	group.SetMaxGoNum(2) // 关键：限制并发度为2
+	group.AddMiddleware(GraphvizMW())
+
+	// 添加节点到组
+	group.AddNode(nodeA)
+	group.AddNode(nodeB)
+	group.AddNode(nodeC)
+	group.AddNode(nodeD)
+	group.AddNode(nodeE)
+
+	start := time.Now()
+	err := group.AsNode().Exec(ctx, 42)
+	totalTime := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("Failed to execute group: %v", err)
+	}
+
+	// 验证总执行时间
+	// 理论上的执行序列：A(0-50) + B(0-100) 并行，然后 C(50-130) + D(50-110)，最后 E(130-170)
+	// 总时间应该约为170ms
+	expectedMin := 170 * time.Millisecond
+	expectedMax := 190 * time.Millisecond
+
+	if totalTime < expectedMin {
+		t.Errorf("Total execution time %v is less than expected minimum %v", totalTime, expectedMin)
+	}
+	if totalTime > expectedMax {
+		t.Errorf("Total execution time %v is greater than expected maximum %v", totalTime, expectedMax)
+	}
+
+	// 输出图信息
+	info := graph.GetInfo()
+	if info != "" {
+		fmt.Printf("Concurrency limit test graph info: %s\n", info)
+	}
+
+	t.Logf("Total execution time: %v", totalTime)
+}
+
 func TestGroupExec(t *testing.T) {
 	ctx := context.TODO()
 	Convey("group", t, func() {
@@ -212,7 +298,7 @@ func TestGroupExec(t *testing.T) {
 		graph.AddNode(g2.AsNode())
 		graph.AddNode(g3.AsNode())
 
-		ctx, graphviz := newGraphvizBuilder("flow").Build(ctx)
+		ctx, graphviz := newGraphvizBuilder("GroupExec").Build(ctx)
 		defer graphviz.Log(ctx)
 		graph.AddGlobalMW(GraphvizMW())
 		//graph.AddGlobalMW(LoggerMW())

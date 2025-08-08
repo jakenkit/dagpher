@@ -309,7 +309,7 @@ func (g *Graphviz) divideIntoGroups() []*graphGroup {
 		roots []*graphNode
 		nexts = map[DependencyNode][]*graphNode{}
 	)
-	
+
 	for _, node := range g.nodes {
 		isRoot := true
 		for _, depName := range node.Node.Dependencies() {
@@ -332,7 +332,7 @@ func (g *Graphviz) divideIntoGroups() []*graphGroup {
 	// 使用连通分量算法进行分组
 	var groups []*graphGroup
 	visited := map[*graphNode]bool{}
-	
+
 	// 对每个根节点进行DFS遍历，形成连通分量
 	for _, root := range roots {
 		if visited[root] {
@@ -364,7 +364,7 @@ func (g *Graphviz) divideIntoGroups() []*graphGroup {
 		if len(group.Nodes) == 0 {
 			continue
 		}
-		
+
 		// 按时间排序节点
 		// 简单排序：按开始时间排序
 		for i := 0; i < len(group.Nodes)-1; i++ {
@@ -374,7 +374,7 @@ func (g *Graphviz) divideIntoGroups() []*graphGroup {
 				}
 			}
 		}
-		
+
 		group.First = group.Nodes[0]
 		group.Last = group.Nodes[len(group.Nodes)-1]
 		group.MinStart = group.First.Start
@@ -414,65 +414,191 @@ func (g *Graphviz) calculateLongestPath(group *graphGroup) ([]*graphNode, time.D
 		return nil, 0
 	}
 
+	// 基于实际执行时间计算关键路径
+	return g.calculateCriticalPathFromActualTimes(group)
+}
+
+// calculateCriticalPathFromActualTimes 基于实际执行时间计算关键路径
+func (g *Graphviz) calculateCriticalPathFromActualTimes(group *graphGroup) ([]*graphNode, time.Duration) {
+	if len(group.Nodes) == 0 {
+		return nil, 0
+	}
+
+	// 首先检查是否为串行执行模式
+	// 如果节点按时间顺序基本没有重叠，则认为是串行执行
+	isSerialExecution := g.detectSerialExecution(group)
+	
+	if isSerialExecution {
+		return g.calculateSerialExecutionPath(group)
+	}
+	
+	// 并行执行模式：基于依赖关系计算关键路径
+	return g.calculateParallelExecutionPath(group)
+}
+
+// detectSerialExecution 检测是否为串行执行
+func (g *Graphviz) detectSerialExecution(group *graphGroup) bool {
+	if len(group.Nodes) <= 1 {
+		return false
+	}
+	
+	// 按开始时间排序节点
+	sortedNodes := make([]*graphNode, len(group.Nodes))
+	copy(sortedNodes, group.Nodes)
+	for i := 0; i < len(sortedNodes)-1; i++ {
+		for j := i + 1; j < len(sortedNodes); j++ {
+			if sortedNodes[i].Start.After(sortedNodes[j].Start) {
+				sortedNodes[i], sortedNodes[j] = sortedNodes[j], sortedNodes[i]
+			}
+		}
+	}
+	
+	// 检查相邻节点的时间重叠
+	overlapCount := 0
+	totalPairs := len(sortedNodes) - 1
+	
+	for i := 0; i < len(sortedNodes)-1; i++ {
+		current := sortedNodes[i]
+		next := sortedNodes[i+1]
+		
+		// 如果下一个节点在当前节点结束之前开始，则有重叠
+		if next.Start.Before(current.Finish) {
+			overlapCount++
+		}
+	}
+	
+	// 如果重叠率小于30%，认为是串行执行
+	overlapRatio := float64(overlapCount) / float64(totalPairs)
+	return overlapRatio < 0.3
+}
+
+// calculateSerialExecutionPath 计算串行执行的路径
+func (g *Graphviz) calculateSerialExecutionPath(group *graphGroup) ([]*graphNode, time.Duration) {
+	if len(group.Nodes) == 0 {
+		return nil, 0
+	}
+	
+	// 按实际开始时间排序所有节点
+	sortedNodes := make([]*graphNode, len(group.Nodes))
+	copy(sortedNodes, group.Nodes)
+	for i := 0; i < len(sortedNodes)-1; i++ {
+		for j := i + 1; j < len(sortedNodes); j++ {
+			if sortedNodes[i].Start.After(sortedNodes[j].Start) {
+				sortedNodes[i], sortedNodes[j] = sortedNodes[j], sortedNodes[i]
+			}
+		}
+	}
+	
+	// 在串行执行中，所有节点都在关键路径上
+	totalDuration := time.Duration(0)
+	if len(sortedNodes) > 0 {
+		totalDuration = sortedNodes[len(sortedNodes)-1].Finish.Sub(sortedNodes[0].Start)
+	}
+	
+	return sortedNodes, totalDuration
+}
+
+// calculateParallelExecutionPath 计算并行执行的关键路径
+func (g *Graphviz) calculateParallelExecutionPath(group *graphGroup) ([]*graphNode, time.Duration) {
 	// 构建节点映射和依赖关系
 	nodeMap := make(map[string]*graphNode)
+	dependents := make(map[string][]*graphNode) // dep -> [nodes that depend on dep]
+	
 	for _, node := range group.Nodes {
 		nodeMap[node.Node.Name()] = node
 	}
-
-	type pathResult struct {
-		path     []*graphNode
-		duration time.Duration
-	}
-	// 使用动态规划计算从每个节点开始的最长路径
-	memo := make(map[*graphNode]*pathResult)
-
-	var dfs func(*graphNode) *pathResult
-	dfs = func(node *graphNode) *pathResult {
-		if result, exists := memo[node]; exists {
-			return result
-		}
-
-		// 基础路径就是当前节点
-		currentDuration := node.Finish.Sub(node.Start)
-		bestPath := []*graphNode{node}
-		maxTotalDuration := currentDuration
-
-		// 查找所有依赖当前节点的后续节点
-		for _, candidate := range group.Nodes {
-			for _, depName := range candidate.Node.Dependencies() {
-				if depName == node.Node.Name() {
-					// candidate 依赖 node，递归计算 candidate 的最长路径
-					subResult := dfs(candidate)
-					totalDuration := currentDuration + subResult.duration
-					if totalDuration > maxTotalDuration {
-						maxTotalDuration = totalDuration
-						bestPath = append([]*graphNode{node}, subResult.path...)
-					}
-				}
+	
+	for _, node := range group.Nodes {
+		for _, depName := range node.Node.Dependencies() {
+			if depNode := nodeMap[depName]; depNode != nil {
+				dependents[depName] = append(dependents[depName], node)
 			}
 		}
-
-		result := &pathResult{
-			path:     bestPath,
-			duration: maxTotalDuration,
+	}
+	
+	// 使用动态规划计算从每个节点开始的最长路径
+	type pathInfo struct {
+		path          []*graphNode
+		totalDuration time.Duration
+	}
+	
+	memo := make(map[string]*pathInfo)
+	
+	var calculateLongestPath func(string) *pathInfo
+	calculateLongestPath = func(nodeName string) *pathInfo {
+		if info, exists := memo[nodeName]; exists {
+			return info
 		}
-		memo[node] = result
+		
+		node := nodeMap[nodeName]
+		if node == nil {
+			return &pathInfo{path: []*graphNode{}, totalDuration: 0}
+		}
+		
+		// 当前节点的基础路径
+		currentDuration := node.Finish.Sub(node.Start)
+		bestPath := []*graphNode{node}
+		maxFollowingDuration := time.Duration(0)
+		
+		// 查看所有依赖当前节点的后续节点，找到最长路径
+		for _, dependent := range dependents[nodeName] {
+			followingInfo := calculateLongestPath(dependent.Node.Name())
+			
+			// 计算总的路径时间（包括等待时间）
+			waitTime := dependent.Start.Sub(node.Finish)
+			if waitTime < 0 {
+				waitTime = 0
+			}
+			totalFollowingTime := waitTime + followingInfo.totalDuration
+			
+			if totalFollowingTime > maxFollowingDuration {
+				maxFollowingDuration = totalFollowingTime
+				bestPath = append([]*graphNode{node}, followingInfo.path...)
+			}
+		}
+		
+		result := &pathInfo{
+			path:          bestPath,
+			totalDuration: currentDuration + maxFollowingDuration,
+		}
+		memo[nodeName] = result
 		return result
 	}
-
-	// 找到全局最长路径
-	var globalLongestPath []*graphNode
-	var globalMaxDuration time.Duration
-
+	
+	// 找到所有可能的起始节点（在组内没有前驱的节点）
+	var startNodes []*graphNode
 	for _, node := range group.Nodes {
-		result := dfs(node)
-		if result.duration > globalMaxDuration {
-			globalMaxDuration = result.duration
-			globalLongestPath = result.path
+		hasInternalDependency := false
+		for _, depName := range node.Node.Dependencies() {
+			if nodeMap[depName] != nil {
+				hasInternalDependency = true
+				break
+			}
+		}
+		if !hasInternalDependency {
+			startNodes = append(startNodes, node)
 		}
 	}
-
+	
+	// 从所有起始节点中找到最长路径
+	var globalLongestPath []*graphNode
+	var globalMaxDuration time.Duration
+	
+	for _, startNode := range startNodes {
+		pathInfo := calculateLongestPath(startNode.Node.Name())
+		
+		// 使用路径的实际端到端时间
+		actualEndToEndTime := time.Duration(0)
+		if len(pathInfo.path) > 0 {
+			actualEndToEndTime = pathInfo.path[len(pathInfo.path)-1].Finish.Sub(pathInfo.path[0].Start)
+		}
+		
+		if actualEndToEndTime > globalMaxDuration {
+			globalMaxDuration = actualEndToEndTime
+			globalLongestPath = pathInfo.path
+		}
+	}
+	
 	return globalLongestPath, globalMaxDuration
 }
 
