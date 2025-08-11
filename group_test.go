@@ -343,3 +343,120 @@ func findIndex(slice []string, target string) int {
 	}
 	return -1
 }
+
+// ExampleContext represents the context passed between nodes
+type ExampleContext struct {
+	Data map[string]interface{}
+}
+
+func TestGroupVisualization(t *testing.T) {
+	// Create a new graph
+	graph := NewGraph[*ExampleContext]()
+
+	// Create execution context
+	execCtx := &ExampleContext{
+		Data: make(map[string]interface{}),
+	}
+
+	// Create group1
+	group1 := NewGroup[*ExampleContext]("group1")
+	group1.AddNode(NewNode("A1", func(ctx context.Context, c *ExampleContext) error {
+		if execContext := GetExecutionContext(ctx); execContext != nil {
+			fmt.Printf("Executing node: %s, Group Path: %s, Full Path: %s\n",
+				execContext.NodeName, execContext.GroupPath, execContext.FullPath())
+		}
+		c.Data["A1"] = "completed"
+		return nil
+	}))
+
+	group1.AddNode(NewNode("B1", func(ctx context.Context, c *ExampleContext) error {
+		if execContext := GetExecutionContext(ctx); execContext != nil {
+			fmt.Printf("Executing node: %s, Group Path: %s, Full Path: %s\n",
+				execContext.NodeName, execContext.GroupPath, execContext.FullPath())
+		}
+		c.Data["B1"] = "completed"
+		return nil
+	}, "A1"))
+
+	// Create group2
+	group2 := NewGroup[*ExampleContext]("group2")
+	group2.AddNode(NewNode("A2", func(ctx context.Context, c *ExampleContext) error {
+		if execContext := GetExecutionContext(ctx); execContext != nil {
+			fmt.Printf("Executing node: %s, Group Path: %s, Full Path: %s\n",
+				execContext.NodeName, execContext.GroupPath, execContext.FullPath())
+		}
+		c.Data["A2"] = "completed"
+		return nil
+	}))
+
+	group2.AddNode(NewNode("B2", func(ctx context.Context, c *ExampleContext) error {
+		if execContext := GetExecutionContext(ctx); execContext != nil {
+			fmt.Printf("Executing node: %s, Group Path: %s, Full Path: %s\n",
+				execContext.NodeName, execContext.GroupPath, execContext.FullPath())
+		}
+		c.Data["B2"] = "completed"
+		return nil
+	}, "A2"))
+
+	// Create group3 with nested group4
+	group4 := NewGroup[*ExampleContext]("group4")
+	group4.AddNode(NewNode("A4", func(ctx context.Context, c *ExampleContext) error {
+		if execContext := GetExecutionContext(ctx); execContext != nil {
+			fmt.Printf("Executing node: %s, Group Path: %s, Full Path: %s\n",
+				execContext.NodeName, execContext.GroupPath, execContext.FullPath())
+		}
+		c.Data["A4"] = "completed"
+		return nil
+	}))
+
+	group4.AddNode(NewNode("B4", func(ctx context.Context, c *ExampleContext) error {
+		if execContext := GetExecutionContext(ctx); execContext != nil {
+			fmt.Printf("Executing node: %s, Group Path: %s, Full Path: %s\n",
+				execContext.NodeName, execContext.GroupPath, execContext.FullPath())
+		}
+		c.Data["B4"] = "completed"
+		return nil
+	}, "A4"))
+
+	group3 := NewGroup[*ExampleContext]("group3")
+	group3.AddNode(NewNode("A3", func(ctx context.Context, c *ExampleContext) error {
+		if execContext := GetExecutionContext(ctx); execContext != nil {
+			fmt.Printf("Executing node: %s, Group Path: %s, Full Path: %s\n",
+				execContext.NodeName, execContext.GroupPath, execContext.FullPath())
+		}
+		c.Data["A3"] = "completed"
+		return nil
+	}))
+
+	// Add group4 as a subgroup of group3
+	group3.AddGroup(group4)
+
+	// Add groups to the main graph
+	graph.AddNode(group1.AsNode())
+	graph.AddNode(group2.AsNode())
+	graph.AddNode(group3.AsNode())
+
+	// Add a global middleware to see execution context in middleware
+	graph.AddGlobalMW(LoggerMW())
+
+	// Add a custom middleware that shows execution context
+	contextMW := func(node DependencyNode, next Endpoint) Endpoint {
+		return func(ctx context.Context, req interface{}) (interface{}, error) {
+			if execContext := GetExecutionContext(ctx); execContext != nil {
+				fmt.Printf("Middleware - Node: %s, Group Path: %s, Full Path: %s, Depth: %d\n",
+					execContext.NodeName, execContext.GroupPath, execContext.FullPath(), execContext.GetGroupDepth())
+			}
+
+			return next(ctx, req)
+		}
+	}
+
+	// Add the custom middleware to the graph
+	graph.AddGlobalMW(contextMW)
+
+	// Execute the graph
+	err := graph.Exec(context.Background(), execCtx)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+	}
+}

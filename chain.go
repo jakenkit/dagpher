@@ -91,17 +91,20 @@ func (c *Chain[C]) Build() error {
 	return nil
 }
 
-// Exec executes all nodes in the chain sequentially
-func (c *Chain[C]) Exec(ctx context.Context, execCtx C) error {
+// ExecWithContext executes all nodes in the chain sequentially with the specified group path context
+func (c *Chain[C]) ExecWithContext(ctx context.Context, execCtx C, parentPath string) error {
 	if !c.built {
 		if err := c.Build(); err != nil {
 			return err
 		}
 	}
 
-	for _, node := range c.nodes {
+	// Build current chain path
+	currentPath := buildGroupPath(parentPath, c.name)
+
+	for i, node := range c.nodes {
 		if err := c.wrapWithSemaphore(func(ctx context.Context, ec C) error {
-			return c.executeNode(ctx, ec, node)
+			return c.executeNodeWithContext(ctx, ec, node, currentPath, i)
 		})(ctx, execCtx); err != nil {
 			return err
 		}
@@ -109,16 +112,32 @@ func (c *Chain[C]) Exec(ctx context.Context, execCtx C) error {
 	return nil
 }
 
+// Exec executes all nodes in the chain sequentially
+func (c *Chain[C]) Exec(ctx context.Context, execCtx C) error {
+	return c.ExecWithContext(ctx, execCtx, "")
+}
+
 // wrapWithSemaphore wraps an execution function with semaphore control.
 func (c *Chain[C]) wrapWithSemaphore(exec func(context.Context, C) error) func(context.Context, C) error {
 	return executor.WrapWithSemaphore(c.globalSem, exec)
 }
 
-// executeNode executes a single node with middleware applied
-func (c *Chain[C]) executeNode(ctx context.Context, execCtx C, node Node[C]) error {
+// executeNodeWithContext executes a single node with middleware applied and execution context
+func (c *Chain[C]) executeNodeWithContext(ctx context.Context, execCtx C, node Node[C], chainPath string, nodeIndex int) error {
 	if adapter, ok := node.(*GroupNodeAdapter[C]); ok {
-		return adapter.group.Exec(ctx, execCtx)
+		return adapter.group.ExecWithContext(ctx, execCtx, chainPath)
 	}
 
-	return ExecuteWithMiddleware(c.globalMws, node, ctx, execCtx)
+	// For regular nodes in chain, create execution context
+	// Use node name with index to make it unique in sequential execution
+	nodeName := fmt.Sprintf("%s[%d]", node.Name(), nodeIndex)
+	execContext := NewExecutionContext(chainPath, nodeName)
+	ctxWithExecContext := WithExecutionContext(ctx, execContext)
+
+	return ExecuteWithMiddleware(c.globalMws, node, ctxWithExecContext, execCtx)
+}
+
+// executeNode executes a single node with middleware applied (backward compatibility)
+func (c *Chain[C]) executeNode(ctx context.Context, execCtx C, node Node[C]) error {
+	return c.executeNodeWithContext(ctx, execCtx, node, c.name, 0)
 }

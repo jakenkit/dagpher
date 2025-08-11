@@ -285,7 +285,7 @@ func TestGroupExec(t *testing.T) {
 		g3.AddNode(E) // (931,191673)
 
 		g4 := NewGroup[*Tuple2]("group4")
-		A, B, C, D, E = NewCalcNodes(Param{SetDep: true, SetName: 4})
+		A, B, C, D, E = NewCalcNodes(Param{SetDep: false, SetName: 4})
 		g4.AddNode(A)
 		g4.AddNode(B)
 		g4.AddNode(C)
@@ -312,4 +312,32 @@ func TestGroupExec(t *testing.T) {
 		So(cost, ShouldBeGreaterThanOrEqualTo, time.Millisecond*1450)
 		So(cost, ShouldBeLessThan, time.Millisecond*1459)
 	})
+}
+
+func TestGraphviz(t *testing.T) {
+	var (
+		graph  = NewGraph[*Tuple2]()
+		exeCtx = &Tuple2{
+			First:  1,
+			Second: 1,
+		}
+	)
+
+	g4 := NewGroup[*Tuple2]("group4")
+	A, B, C, D, E := NewCalcNodes(Param{SetDep: false, SetName: 4})
+	g4.AddNode(A)
+	g4.AddNode(B)
+	g4.AddNode(C)
+	g4.AddNode(D)
+	g4.AddNode(E) // (4681, 6711801)
+	graph.AddNode(g4.AsNode())
+
+	ctx := context.TODO()
+	ctx, graphviz := newGraphvizBuilder("GroupExec").Build(ctx)
+	defer graphviz.Log(ctx)
+	graph.AddGlobalMW(GraphvizMW())
+	//graph.AddGlobalMW(LoggerMW())
+
+	err := graph.Exec(ctx, exeCtx)
+	So(err, ShouldBeNil)
 }

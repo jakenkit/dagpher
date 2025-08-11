@@ -63,5 +63,6 @@ func (g *Graph[C]) Build() error {
 }
 
 func (g *Graph[C]) Exec(ctx context.Context, execCtx C) error {
-	return g.group.Exec(ctx, execCtx)
+	// Graph starts with empty parent path, its own name becomes the root path
+	return g.group.ExecWithContext(ctx, execCtx, "")
 }

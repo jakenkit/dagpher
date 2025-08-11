@@ -12,14 +12,14 @@ import (
 	"github.com/jakenier/dagpher/executor"
 )
 
-// NodeContainer defines the interface for managing nodes within a container.
-// It provides methods for adding nodes, configuring middleware, and controlling concurrency.
-type NodeContainer[C any] interface {
-	AddNode(Node[C], ...Option) error
-	AddMiddleware(...Middleware) NodeContainer[C]
-	SetMaxGoNum(int) NodeContainer[C]
-	SetGlobalSem(*semaphore.Weighted) NodeContainer[C]
-}
+//// NodeContainer defines the interface for managing nodes within a container.
+//// It provides methods for adding nodes, configuring middleware, and controlling concurrency.
+//type NodeContainer[C any] interface {
+//	AddNode(Node[C], ...Option) error
+//	AddMiddleware(...Middleware) NodeContainer[C]
+//	SetMaxGoNum(int) NodeContainer[C]
+//	SetGlobalSem(*semaphore.Weighted) NodeContainer[C]
+//}
 
 // GroupNodeAdapter adapts a Group to implement the Node interface
 // It's a lightweight adapter that delegates to the group for actual execution
@@ -136,6 +136,14 @@ func (g *Group[C]) Build() error {
 	return g.ensureBuilt()
 }
 
+// ExecWithContext executes the group's internal DAG with the specified group path context
+func (g *Group[C]) ExecWithContext(ctx context.Context, execCtx C, groupPath string) error {
+	if err := g.ensureBuilt(); err != nil {
+		return fmt.Errorf("failed to build group %s: %w", g.name, err)
+	}
+	return g.groupExec.ExecuteWithContext(ctx, execCtx, groupPath)
+}
+
 // Exec executes the group's internal DAG
 func (g *Group[C]) Exec(ctx context.Context, execCtx C) error {
 	if err := g.ensureBuilt(); err != nil {
@@ -181,12 +189,15 @@ func newGroupExecutor[C any](group *Group[C], globalSem *semaphore.Weighted, glo
 func (g *groupExecutor[C]) Build() error {
 	visited := make(map[*Group[C]]bool)
 
-	var collectAndAddNodes func(group *Group[C]) error
-	collectAndAddNodes = func(group *Group[C]) error {
+	var collectAndAddNodes func(group *Group[C], parentPath string) error
+	collectAndAddNodes = func(group *Group[C], parentPath string) error {
 		if visited[group] {
 			return nil
 		}
 		visited[group] = true
+
+		// Build current group path
+		currentGroupPath := buildGroupPath(parentPath, group.name)
 
 		for name, node := range group.nodeMap {
 			capturedNode := node
@@ -211,7 +222,10 @@ func (g *groupExecutor[C]) Build() error {
 
 				// Add the sub-group as a container node to the parent executor
 				// Container nodes don't consume semaphore slots as their internal nodes will
-				err := g.exec.AddContainerNode(capturedName, subGroupExec.Execute, capturedNode.Dependencies()...)
+				execFunc := func(ctx context.Context, c C) error {
+					return subGroupExec.ExecuteWithContext(ctx, c, currentGroupPath)
+				}
+				err := g.exec.AddContainerNode(capturedName, execFunc, capturedNode.Dependencies()...)
 				if err != nil {
 					return err
 				}
@@ -221,7 +235,10 @@ func (g *groupExecutor[C]) Build() error {
 				mws := opt.mergeMws(g.globalMws)
 
 				execNode := func(ctx context.Context, c C) error {
-					return ExecuteWithMiddleware(mws, capturedNode, ctx, c)
+					// Create execution context for this node
+					execContext := NewExecutionContext(currentGroupPath, capturedName)
+					ctxWithExecContext := WithExecutionContext(ctx, execContext)
+					return ExecuteWithMiddleware(mws, capturedNode, ctxWithExecContext, c)
 				}
 
 				// Add leaf node with semaphore control
@@ -235,7 +252,7 @@ func (g *groupExecutor[C]) Build() error {
 		return nil
 	}
 
-	if err := collectAndAddNodes(g.group); err != nil {
+	if err := collectAndAddNodes(g.group, ""); err != nil {
 		return err
 	}
 
@@ -243,9 +260,74 @@ func (g *groupExecutor[C]) Build() error {
 }
 
 func (g *groupExecutor[C]) Execute(ctx context.Context, execCtx C) error {
+	return g.ExecuteWithContext(ctx, execCtx, "")
+}
+
+func (g *groupExecutor[C]) ExecuteWithContext(ctx context.Context, execCtx C, parentPath string) error {
 	if g.exec == nil {
 		return fmt.Errorf("executor is not built, call Build() first")
 	}
 
-	return g.exec.Execute(ctx, execCtx)
+	// For execution, we need to rebuild the execution graph with the correct parent path
+	// This is necessary because the group path is determined at execution time
+	visited := make(map[*Group[C]]bool)
+	tempExec := executor.NewEngine[C]()
+
+	var collectAndAddNodes func(group *Group[C], parentPath string) error
+	collectAndAddNodes = func(group *Group[C], parentPath string) error {
+		if visited[group] {
+			return nil
+		}
+		visited[group] = true
+
+		// Build current group path
+		currentGroupPath := buildGroupPath(parentPath, group.name)
+
+		for name, node := range group.nodeMap {
+			capturedNode := node
+			capturedName := name
+
+			// If the node is a GroupNodeAdapter, extract the underlying group
+			if adapter, ok := capturedNode.(*GroupNodeAdapter[C]); ok {
+				subGroup := adapter.group
+
+				// Add the sub-group as a container node
+				execFunc := func(ctx context.Context, c C) error {
+					return subGroup.ExecWithContext(ctx, c, currentGroupPath)
+				}
+				err := tempExec.AddContainerNode(capturedName, execFunc, capturedNode.Dependencies()...)
+				if err != nil {
+					return err
+				}
+			} else {
+				// This is a regular leaf node
+				opt := group.nodeOptions[capturedName]
+				mws := opt.mergeMws(g.globalMws)
+
+				execNode := func(ctx context.Context, c C) error {
+					// Create execution context for this node
+					execContext := NewExecutionContext(currentGroupPath, capturedName)
+					ctxWithExecContext := WithExecutionContext(ctx, execContext)
+					return ExecuteWithMiddleware(mws, capturedNode, ctxWithExecContext, c)
+				}
+
+				// Add leaf node
+				err := tempExec.AddNode(capturedName, execNode, capturedNode.Dependencies()...)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+
+	if err := collectAndAddNodes(g.group, parentPath); err != nil {
+		return err
+	}
+
+	if err := tempExec.Build(); err != nil {
+		return err
+	}
+
+	return tempExec.Execute(ctx, execCtx)
 }
