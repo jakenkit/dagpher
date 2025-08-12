@@ -12,14 +12,14 @@ import (
 	"github.com/jakenier/dagpher/executor"
 )
 
-// NodeContainer defines the interface for managing nodes within a container.
-// It provides methods for adding nodes, configuring middleware, and controlling concurrency.
-type NodeContainer[C any] interface {
-	AddNode(Node[C], ...Option) error
-	AddMiddleware(...Middleware) NodeContainer[C]
-	SetMaxGoNum(int) NodeContainer[C]
-	SetGlobalSem(*semaphore.Weighted) NodeContainer[C]
-}
+//// NodeContainer defines the interface for managing nodes within a container.
+//// It provides methods for adding nodes, configuring middleware, and controlling concurrency.
+//type NodeContainer[C any] interface {
+//	AddNode(Node[C], ...Option) error
+//	AddMiddleware(...Middleware) NodeContainer[C]
+//	SetMaxGoNum(int) NodeContainer[C]
+//	SetGlobalSem(*semaphore.Weighted) NodeContainer[C]
+//}
 
 // GroupNodeAdapter adapts a Group to implement the Node interface
 // It's a lightweight adapter that delegates to the group for actual execution
@@ -136,11 +136,27 @@ func (g *Group[C]) Build() error {
 	return g.ensureBuilt()
 }
 
-// Exec executes the group's internal DAG
+// Exec executes the group's internal DAG with hierarchy context
+// Note: This method is now mainly used when Group is used as a standalone container
+// When used through Graph, the hierarchy context is managed in the groupExecutor
 func (g *Group[C]) Exec(ctx context.Context, execCtx C) error {
 	if err := g.ensureBuilt(); err != nil {
 		return fmt.Errorf("failed to build group %s: %w", g.name, err)
 	}
+
+	//// Create or extend hierarchy path only if this is a top-level execution
+	//// (i.e., Group being executed independently, not through Graph)
+	//var hierarchyPath *HierarchyPath
+	//if _, ok := GetHierarchyPath(ctx); ok {
+	//	// If there's already a path, this group is being executed as part of a hierarchy
+	//	// The path management is handled by the parent executor
+	//	return g.groupExec.Execute(ctx, execCtx)
+	//} else {
+	//	// This is a top-level group execution, initialize with group name
+	//	hierarchyPath = NewHierarchyPath(g.name)
+	//	hierarchyCtx := WithHierarchyPath(ctx, hierarchyPath)
+	//	return g.groupExec.Execute(hierarchyCtx, execCtx)
+	//}
 	return g.groupExec.Execute(ctx, execCtx)
 }
 
@@ -195,7 +211,7 @@ func (g *groupExecutor[C]) Build() error {
 			// If the node is a GroupNodeAdapter, extract the underlying group
 			if adapter, ok := capturedNode.(*GroupNodeAdapter[C]); ok {
 				subGroup := adapter.group
-				// Create a new executor for the sub-group, propagate global middleware
+				// Create a new executor for the subgroup, propagate global middleware
 				subGroup.globalMws = append(subGroup.globalMws, g.globalMws...)
 
 				var semToUse *semaphore.Weighted
@@ -209,9 +225,13 @@ func (g *groupExecutor[C]) Build() error {
 					return err
 				}
 
-				// Add the sub-group as a container node to the parent executor
-				// Container nodes don't consume semaphore slots as their internal nodes will
-				err := g.exec.AddContainerNode(capturedName, subGroupExec.Execute, capturedNode.Dependencies()...)
+				// Add the subgroup as a container node to the parent executor
+				// Create a wrapper that adds the subgroup name to the hierarchy path
+				err := g.exec.AddContainerNode(capturedName, func(ctx context.Context, c C) error {
+					// Extend hierarchy path with subgroup name
+					ctx = WithPushedHierarchyPath(ctx, subGroup.name)
+					return subGroupExec.Execute(ctx, c)
+				}, capturedNode.Dependencies()...)
 				if err != nil {
 					return err
 				}
@@ -221,6 +241,7 @@ func (g *groupExecutor[C]) Build() error {
 				mws := opt.mergeMws(g.globalMws)
 
 				execNode := func(ctx context.Context, c C) error {
+					// The hierarchy context is already in ctx from the parent group
 					return ExecuteWithMiddleware(mws, capturedNode, ctx, c)
 				}
 

@@ -297,11 +297,13 @@ func TestGroupExec(t *testing.T) {
 		graph.AddNode(g1.AsNode())
 		graph.AddNode(g2.AsNode())
 		graph.AddNode(g3.AsNode())
+		A, B, C, D, E = NewCalcNodes(Param{SetDep: true, SetName: 5})
+		graph.AddNode(A)
 
 		ctx, graphviz := newGraphvizBuilder("GroupExec").Build(ctx)
 		defer graphviz.Log(ctx)
 		graph.AddGlobalMW(GraphvizMW())
-		//graph.AddGlobalMW(LoggerMW())
+		graph.AddGlobalMW(LoggerMW())
 
 		now := time.Now()
 		err := graph.Exec(ctx, exeCtx)

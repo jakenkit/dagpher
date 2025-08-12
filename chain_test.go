@@ -78,6 +78,7 @@ func TestChainWithGroups(t *testing.T) {
 			c.AddExecution("after-group")
 			return nil
 		}))
+	chain.AddGlobalMW(LoggerMW())
 
 	// Build and execute
 	if err := chain.Build(); err != nil {
@@ -307,4 +308,123 @@ func TestChainPipeline(t *testing.T) {
 		So(cost, ShouldBeGreaterThanOrEqualTo, time.Millisecond*540)
 		So(cost, ShouldBeLessThan, time.Millisecond*549) // Add a little buffer
 	})
+}
+
+type ChainExecContext struct {
+	Data    string
+	Counter int
+}
+
+func TestChainExecPath(t *testing.T) {
+	// 创建 Chain
+	chain := NewChain[*ChainExecContext]()
+
+	// 添加全局中间件
+	chain.AddGlobalMW(LoggerMW())
+
+	// 创建一些普通节点
+	node1 := NewNode("node1", func(ctx context.Context, c *ChainExecContext) error {
+		if path, ok := GetHierarchyPath(ctx); ok {
+			fmt.Printf("  -> Node1 executing in path: %s\n", path.String())
+		}
+		c.Counter++
+		time.Sleep(10 * time.Millisecond)
+		return nil
+	})
+
+	// 创建组节点
+	group1 := NewGroup[*ChainExecContext]("group1")
+	group1.AddNode(NewNode("A1", func(ctx context.Context, c *ChainExecContext) error {
+		if path, ok := GetHierarchyPath(ctx); ok {
+			fmt.Printf("  -> A1 executing in path: %s\n", path.String())
+		}
+		c.Counter += 10
+		time.Sleep(10 * time.Millisecond)
+		return nil
+	}))
+
+	group1.AddNode(NewNode("B1", func(ctx context.Context, c *ChainExecContext) error {
+		if path, ok := GetHierarchyPath(ctx); ok {
+			fmt.Printf("  -> B1 executing in path: %s\n", path.String())
+		}
+		c.Counter += 100
+		time.Sleep(10 * time.Millisecond)
+		return nil
+	}))
+
+	// 创建嵌套组
+	group2 := NewGroup[*ChainExecContext]("group2")
+	subGroup := NewGroup[*ChainExecContext]("subgroup")
+	subGroup.AddNode(NewNode("S1", func(ctx context.Context, c *ChainExecContext) error {
+		if path, ok := GetHierarchyPath(ctx); ok {
+			fmt.Printf("  -> S1 executing in path: %s\n", path.String())
+		}
+		c.Counter += 1000
+		time.Sleep(10 * time.Millisecond)
+		return nil
+	}))
+
+	group2.AddNode(NewNode("A2", func(ctx context.Context, c *ChainExecContext) error {
+		if path, ok := GetHierarchyPath(ctx); ok {
+			fmt.Printf("  -> A2 executing in path: %s\n", path.String())
+		}
+		c.Counter += 10000
+		time.Sleep(10 * time.Millisecond)
+		return nil
+	}))
+	group2.AddGroup(subGroup)
+
+	// 添加节点到 Chain（按顺序执行）
+	chain.AddNode(node1)
+	chain.AddNode(group1.AsNode())
+	chain.AddNode(group2.AsNode())
+
+	// 构建和执行
+	if err := chain.Build(); err != nil {
+		panic(err)
+	}
+
+	execCtx := &ChainExecContext{Data: "test", Counter: 0}
+	ctx := context.Background()
+
+	fmt.Println("=== Starting Chain execution ===")
+	fmt.Println("Expected execution order and paths:")
+	fmt.Println("  1. node1: chain")
+	fmt.Println("  2. group1 nodes (A1, B1): chain/group1")
+	fmt.Println("  3. group2 nodes:")
+	fmt.Println("     - A2: chain/group2")
+	fmt.Println("     - S1: chain/group2/subgroup")
+	fmt.Println()
+
+	if err := chain.Exec(ctx, execCtx); err != nil {
+		fmt.Printf("Error: %v\n", err)
+	}
+
+	fmt.Printf("Final counter value: %d\n", execCtx.Counter)
+	fmt.Println("=== Chain execution completed ===")
+
+	// 测试独立的 Chain（不在任何父容器中）
+	fmt.Println("\n=== Standalone Chain execution ===")
+	standaloneChain := NewChain[*ChainExecContext]()
+	standaloneChain.AddGlobalMW(LoggerMW())
+
+	standaloneNode := NewNode("standalone", func(ctx context.Context, c *ChainExecContext) error {
+		if path, ok := GetHierarchyPath(ctx); ok {
+			fmt.Printf("  -> Standalone node executing in path: %s\n", path.String())
+		} else {
+			fmt.Printf("  -> Standalone node: no hierarchy path\n")
+		}
+		return nil
+	})
+
+	standaloneChain.AddNode(standaloneNode)
+
+	if err := standaloneChain.Build(); err != nil {
+		panic(err)
+	}
+
+	standaloneCtx := &ChainExecContext{Data: "standalone"}
+	if err := standaloneChain.Exec(context.Background(), standaloneCtx); err != nil {
+		fmt.Printf("Error: %v\n", err)
+	}
 }

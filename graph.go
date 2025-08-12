@@ -62,6 +62,7 @@ func (g *Graph[C]) Build() error {
 	return g.group.Build()
 }
 
+// Exec executes the graph with hierarchy context initialized
 func (g *Graph[C]) Exec(ctx context.Context, execCtx C) error {
 	return g.group.Exec(ctx, execCtx)
 }

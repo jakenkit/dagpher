@@ -91,7 +91,7 @@ func (c *Chain[C]) Build() error {
 	return nil
 }
 
-// Exec executes all nodes in the chain sequentially
+// Exec executes all nodes in the chain sequentially with hierarchy context
 func (c *Chain[C]) Exec(ctx context.Context, execCtx C) error {
 	if !c.built {
 		if err := c.Build(); err != nil {
@@ -99,6 +99,7 @@ func (c *Chain[C]) Exec(ctx context.Context, execCtx C) error {
 		}
 	}
 
+	// ctx = WithPushedHierarchyPath(ctx, c.name)
 	for _, node := range c.nodes {
 		if err := c.wrapWithSemaphore(func(ctx context.Context, ec C) error {
 			return c.executeNode(ctx, ec, node)
@@ -117,7 +118,16 @@ func (c *Chain[C]) wrapWithSemaphore(exec func(context.Context, C) error) func(c
 // executeNode executes a single node with middleware applied
 func (c *Chain[C]) executeNode(ctx context.Context, execCtx C, node Node[C]) error {
 	if adapter, ok := node.(*GroupNodeAdapter[C]); ok {
-		return adapter.group.Exec(ctx, execCtx)
+		// For group adapters, we need to properly handle hierarchy context
+		subGroup := adapter.group
+
+		// Ensure the subgroup is built
+		if err := subGroup.ensureBuilt(); err != nil {
+			return fmt.Errorf("failed to build sub-group %s: %w", adapter.Name(), err)
+		}
+		ctx = WithPushedHierarchyPath(ctx, subGroup.name)
+		// Execute the subgroup with proper hierarchy context
+		return subGroup.groupExec.Execute(ctx, execCtx)
 	}
 
 	return ExecuteWithMiddleware(c.globalMws, node, ctx, execCtx)
