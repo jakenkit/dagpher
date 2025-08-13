@@ -183,20 +183,34 @@ func (g *Graphviz) GetInfo() string {
 	// 绘制
 	graph := gographviz.NewGraph()
 	graphAst, _ := gographviz.Parse([]byte(fmt.Sprintf(`digraph G{rankdir=LR; label="%v %vms";}`,
-		g.name, totalCostMs)))
+			g.name, totalCostMs)))
 	_ = gographviz.Analyse(graphAst, graph)
+
+	// 存储 group path 到 graphviz cluster 名称的映射
+	groupPathToGraphName := make(map[string]string)
 
 	// 绘制子图
 	for idx, group := range groups {
 		graphName := fmt.Sprintf("cluster_%v", idx)
+		groupPathToGraphName[group.GroupPath] = graphName
 
-		// 使用 group path 作为标签
+		// 确定父图和标签
+		parentGraphName := "G" // 默认为根图
 		groupLabel := group.GroupPath
+		if lastSepIndex := strings.LastIndex(group.GroupPath, HierarchyPathJoinChar); lastSepIndex != -1 {
+			parentGroupPath := group.GroupPath[:lastSepIndex]
+			if name, ok := groupPathToGraphName[parentGroupPath]; ok {
+				parentGraphName = name
+			}
+			// 更新标签为子组名
+			groupLabel = group.GroupPath[lastSepIndex+1:]
+		}
+
 		if groupLabel == "" {
 			groupLabel = "root"
 		}
 
-		_ = graph.AddSubGraph("G", graphName, map[string]string{
+		_ = graph.AddSubGraph(parentGraphName, graphName, map[string]string{
 			"label": fmt.Sprintf(`"%s\n%vms"`, groupLabel, group.MaxFinish.Sub(group.MinStart).Milliseconds()),
 			"style": "solid",
 		})
