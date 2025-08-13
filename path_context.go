@@ -5,6 +5,10 @@ import (
 	"strings"
 )
 
+const (
+	HierarchyPathJoinChar = "/"
+)
+
 type hierarchyPathKey struct{}
 
 // HierarchyPath represents the hierarchical path of execution
@@ -29,7 +33,7 @@ func (h *HierarchyPath) Push(name string) *HierarchyPath {
 
 // String returns the full path as a string
 func (h *HierarchyPath) String() string {
-	return strings.Join(h.path, "/")
+	return strings.Join(h.path, HierarchyPathJoinChar)
 }
 
 // GetPath returns the path components

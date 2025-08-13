@@ -69,15 +69,18 @@ func (b *graphvizBuilder) Build(ctx context.Context) (context.Context, *Graphviz
 }
 
 type graphNode struct {
-	Node   DependencyNode
+	Node      DependencyNode
+	GroupPath string // 添加 group path 信息
+
 	Start  time.Time
 	Finish time.Time
 	Error  error
 }
 
-func newGraphNode(node DependencyNode) *graphNode {
+func newGraphNode(node DependencyNode, groupPath string) *graphNode {
 	return &graphNode{
-		Node: node,
+		Node:      node,
+		GroupPath: groupPath,
 	}
 }
 
@@ -113,7 +116,7 @@ func newGraphviz(name string, minCostMs int, costDetail, valid bool) *Graphviz {
 	return g
 }
 
-func (g *Graphviz) record(node DependencyNode, start, finish time.Time, err error) {
+func (g *Graphviz) record(node DependencyNode, groupPath string, start, finish time.Time, err error) {
 	if !g.valid.Load() {
 		return
 	}
@@ -125,7 +128,7 @@ func (g *Graphviz) record(node DependencyNode, start, finish time.Time, err erro
 		return
 	}
 
-	g.nodes = append(g.nodes, newGraphNode(node).
+	g.nodes = append(g.nodes, newGraphNode(node, groupPath).
 		record(start, finish, err))
 	g.nodeMap[node] = true
 }
@@ -174,8 +177,8 @@ func (g *Graphviz) GetInfo() string {
 		}
 	}
 
-	// 分组
-	groups := g.divideIntoGroups()
+	// 基于实际的 group path 进行分组
+	groups := g.divideIntoGroupsByPath()
 
 	// 绘制
 	graph := gographviz.NewGraph()
@@ -186,8 +189,15 @@ func (g *Graphviz) GetInfo() string {
 	// 绘制子图
 	for idx, group := range groups {
 		graphName := fmt.Sprintf("cluster_%v", idx)
+
+		// 使用 group path 作为标签
+		groupLabel := group.GroupPath
+		if groupLabel == "" {
+			groupLabel = "root"
+		}
+
 		_ = graph.AddSubGraph("G", graphName, map[string]string{
-			"label": fmt.Sprintf(`"%vms"`, group.MaxFinish.Sub(group.MinStart).Milliseconds()),
+			"label": fmt.Sprintf(`"%s\n%vms"`, groupLabel, group.MaxFinish.Sub(group.MinStart).Milliseconds()),
 			"style": "solid",
 		})
 
@@ -269,7 +279,7 @@ func (g *Graphviz) GetInfo() string {
 		if idx > 0 {
 			preNode := groups[idx-1].Last.Node
 			nextNode := group.First.Node
-			if group.LongestPath[0].Start.Sub(group.First.Start) < time.Millisecond*2 {
+			if len(group.LongestPath) > 0 && group.LongestPath[0].Start.Sub(group.First.Start) < time.Millisecond*2 {
 				nextNode = group.LongestPath[0].Node
 			}
 			_ = graph.AddEdge(nodeNames[preNode], nodeNames[nextNode], true, map[string]string{
@@ -293,6 +303,7 @@ func (g *Graphviz) GetInfo() string {
 
 // 分组
 type graphGroup struct {
+	GroupPath   string // 添加 group path 标识
 	Nodes       []*graphNode
 	NodeMap     map[*graphNode]bool
 	First       *graphNode
@@ -303,59 +314,53 @@ type graphGroup struct {
 	LongestCost time.Duration
 }
 
-func (g *Graphviz) divideIntoGroups() []*graphGroup {
-	// 构建依赖关系图
-	var (
-		roots []*graphNode
-		nexts = map[DependencyNode][]*graphNode{}
-	)
+// divideIntoGroupsByPath 基于实际的 group path 进行分组
+func (g *Graphviz) divideIntoGroupsByPath() []*graphGroup {
+	// 按 group path 分组节点
+	groupMap := make(map[string]*graphGroup)
 
 	for _, node := range g.nodes {
-		isRoot := true
-		for _, depName := range node.Node.Dependencies() {
-			// 找到对应的依赖节点
-			for _, n := range g.nodes {
-				if n.Node.Name() == depName {
-					nexts[n.Node] = append(nexts[n.Node], node)
-					if g.nodeMap[n.Node] {
-						isRoot = false
-					}
-					break
-				}
+		groupPath := node.GroupPath
+		if groupPath == "" {
+			groupPath = "root" // 默认根组
+		}
+
+		if _, exists := groupMap[groupPath]; !exists {
+			groupMap[groupPath] = &graphGroup{
+				GroupPath: groupPath,
+				Nodes:     []*graphNode{},
+				NodeMap:   map[*graphNode]bool{},
 			}
 		}
-		if isRoot {
-			roots = append(roots, node)
-		}
+
+		group := groupMap[groupPath]
+		group.Nodes = append(group.Nodes, node)
+		group.NodeMap[node] = true
 	}
 
-	// 使用连通分量算法进行分组
+	// 将 map 转换为 slice 并排序
 	var groups []*graphGroup
-	visited := map[*graphNode]bool{}
-
-	// 对每个根节点进行DFS遍历，形成连通分量
-	for _, root := range roots {
-		if visited[root] {
-			continue
-		}
-		group := &graphGroup{
-			Nodes:   []*graphNode{},
-			NodeMap: map[*graphNode]bool{},
-		}
-		g.dfsGroup(root, group, nexts, visited)
+	for _, group := range groupMap {
 		if len(group.Nodes) > 0 {
 			groups = append(groups, group)
 		}
 	}
 
-	// 处理可能遗漏的孤立节点
-	for _, node := range g.nodes {
-		if !visited[node] {
-			group := &graphGroup{
-				Nodes:   []*graphNode{node},
-				NodeMap: map[*graphNode]bool{node: true},
+	// 按 group path 排序，确保父组在子组之前
+	for i := 0; i < len(groups)-1; i++ {
+		for j := i + 1; j < len(groups); j++ {
+			// 首先按路径深度排序（路径中 / 的数量）
+			depthI := strings.Count(groups[i].GroupPath, HierarchyPathJoinChar)
+			depthJ := strings.Count(groups[j].GroupPath, HierarchyPathJoinChar)
+
+			if depthI > depthJ {
+				groups[i], groups[j] = groups[j], groups[i]
+			} else if depthI == depthJ {
+				// 同一深度按字母顺序排序
+				if groups[i].GroupPath > groups[j].GroupPath {
+					groups[i], groups[j] = groups[j], groups[i]
+				}
 			}
-			groups = append(groups, group)
 		}
 	}
 
@@ -366,7 +371,6 @@ func (g *Graphviz) divideIntoGroups() []*graphGroup {
 		}
 
 		// 按时间排序节点
-		// 简单排序：按开始时间排序
 		for i := 0; i < len(group.Nodes)-1; i++ {
 			for j := i + 1; j < len(group.Nodes); j++ {
 				if group.Nodes[i].Start.After(group.Nodes[j].Start) {
@@ -396,19 +400,6 @@ func (g *Graphviz) divideIntoGroups() []*graphGroup {
 	return groups
 }
 
-func (g *Graphviz) dfsGroup(node *graphNode, group *graphGroup, nexts map[DependencyNode][]*graphNode, visited map[*graphNode]bool) {
-	if visited[node] {
-		return
-	}
-	visited[node] = true
-	group.Nodes = append(group.Nodes, node)
-	group.NodeMap[node] = true
-
-	for _, next := range nexts[node.Node] {
-		g.dfsGroup(next, group, nexts, visited)
-	}
-}
-
 func (g *Graphviz) calculateLongestPath(group *graphGroup) ([]*graphNode, time.Duration) {
 	if len(group.Nodes) == 0 {
 		return nil, 0
@@ -427,11 +418,11 @@ func (g *Graphviz) calculateCriticalPathFromActualTimes(group *graphGroup) ([]*g
 	// 首先检查是否为串行执行模式
 	// 如果节点按时间顺序基本没有重叠，则认为是串行执行
 	isSerialExecution := g.detectSerialExecution(group)
-	
+
 	if isSerialExecution {
 		return g.calculateSerialExecutionPath(group)
 	}
-	
+
 	// 并行执行模式：基于依赖关系计算关键路径
 	return g.calculateParallelExecutionPath(group)
 }
@@ -441,7 +432,7 @@ func (g *Graphviz) detectSerialExecution(group *graphGroup) bool {
 	if len(group.Nodes) <= 1 {
 		return false
 	}
-	
+
 	// 按开始时间排序节点
 	sortedNodes := make([]*graphNode, len(group.Nodes))
 	copy(sortedNodes, group.Nodes)
@@ -452,21 +443,21 @@ func (g *Graphviz) detectSerialExecution(group *graphGroup) bool {
 			}
 		}
 	}
-	
+
 	// 检查相邻节点的时间重叠
 	overlapCount := 0
 	totalPairs := len(sortedNodes) - 1
-	
+
 	for i := 0; i < len(sortedNodes)-1; i++ {
 		current := sortedNodes[i]
 		next := sortedNodes[i+1]
-		
+
 		// 如果下一个节点在当前节点结束之前开始，则有重叠
 		if next.Start.Before(current.Finish) {
 			overlapCount++
 		}
 	}
-	
+
 	// 如果重叠率小于30%，认为是串行执行
 	overlapRatio := float64(overlapCount) / float64(totalPairs)
 	return overlapRatio < 0.3
@@ -477,7 +468,7 @@ func (g *Graphviz) calculateSerialExecutionPath(group *graphGroup) ([]*graphNode
 	if len(group.Nodes) == 0 {
 		return nil, 0
 	}
-	
+
 	// 按实际开始时间排序所有节点
 	sortedNodes := make([]*graphNode, len(group.Nodes))
 	copy(sortedNodes, group.Nodes)
@@ -488,13 +479,13 @@ func (g *Graphviz) calculateSerialExecutionPath(group *graphGroup) ([]*graphNode
 			}
 		}
 	}
-	
+
 	// 在串行执行中，所有节点都在关键路径上
 	totalDuration := time.Duration(0)
 	if len(sortedNodes) > 0 {
 		totalDuration = sortedNodes[len(sortedNodes)-1].Finish.Sub(sortedNodes[0].Start)
 	}
-	
+
 	return sortedNodes, totalDuration
 }
 
@@ -503,11 +494,11 @@ func (g *Graphviz) calculateParallelExecutionPath(group *graphGroup) ([]*graphNo
 	// 构建节点映射和依赖关系
 	nodeMap := make(map[string]*graphNode)
 	dependents := make(map[string][]*graphNode) // dep -> [nodes that depend on dep]
-	
+
 	for _, node := range group.Nodes {
 		nodeMap[node.Node.Name()] = node
 	}
-	
+
 	for _, node := range group.Nodes {
 		for _, depName := range node.Node.Dependencies() {
 			if depNode := nodeMap[depName]; depNode != nil {
@@ -515,48 +506,48 @@ func (g *Graphviz) calculateParallelExecutionPath(group *graphGroup) ([]*graphNo
 			}
 		}
 	}
-	
+
 	// 使用动态规划计算从每个节点开始的最长路径
 	type pathInfo struct {
 		path          []*graphNode
 		totalDuration time.Duration
 	}
-	
+
 	memo := make(map[string]*pathInfo)
-	
+
 	var calculateLongestPath func(string) *pathInfo
 	calculateLongestPath = func(nodeName string) *pathInfo {
 		if info, exists := memo[nodeName]; exists {
 			return info
 		}
-		
+
 		node := nodeMap[nodeName]
 		if node == nil {
 			return &pathInfo{path: []*graphNode{}, totalDuration: 0}
 		}
-		
+
 		// 当前节点的基础路径
 		currentDuration := node.Finish.Sub(node.Start)
 		bestPath := []*graphNode{node}
 		maxFollowingDuration := time.Duration(0)
-		
+
 		// 查看所有依赖当前节点的后续节点，找到最长路径
 		for _, dependent := range dependents[nodeName] {
 			followingInfo := calculateLongestPath(dependent.Node.Name())
-			
+
 			// 计算总的路径时间（包括等待时间）
 			waitTime := dependent.Start.Sub(node.Finish)
 			if waitTime < 0 {
 				waitTime = 0
 			}
 			totalFollowingTime := waitTime + followingInfo.totalDuration
-			
+
 			if totalFollowingTime > maxFollowingDuration {
 				maxFollowingDuration = totalFollowingTime
 				bestPath = append([]*graphNode{node}, followingInfo.path...)
 			}
 		}
-		
+
 		result := &pathInfo{
 			path:          bestPath,
 			totalDuration: currentDuration + maxFollowingDuration,
@@ -564,7 +555,7 @@ func (g *Graphviz) calculateParallelExecutionPath(group *graphGroup) ([]*graphNo
 		memo[nodeName] = result
 		return result
 	}
-	
+
 	// 找到所有可能的起始节点（在组内没有前驱的节点）
 	var startNodes []*graphNode
 	for _, node := range group.Nodes {
@@ -579,26 +570,26 @@ func (g *Graphviz) calculateParallelExecutionPath(group *graphGroup) ([]*graphNo
 			startNodes = append(startNodes, node)
 		}
 	}
-	
+
 	// 从所有起始节点中找到最长路径
 	var globalLongestPath []*graphNode
 	var globalMaxDuration time.Duration
-	
+
 	for _, startNode := range startNodes {
 		pathInfo := calculateLongestPath(startNode.Node.Name())
-		
+
 		// 使用路径的实际端到端时间
 		actualEndToEndTime := time.Duration(0)
 		if len(pathInfo.path) > 0 {
 			actualEndToEndTime = pathInfo.path[len(pathInfo.path)-1].Finish.Sub(pathInfo.path[0].Start)
 		}
-		
+
 		if actualEndToEndTime > globalMaxDuration {
 			globalMaxDuration = actualEndToEndTime
 			globalLongestPath = pathInfo.path
 		}
 	}
-	
+
 	return globalLongestPath, globalMaxDuration
 }
 
@@ -627,12 +618,15 @@ func GraphvizMW() Middleware {
 				return next(ctx, req)
 			}
 
+			// 获取当前的 group path
+			groupPath := GetCurrentGroupPath(ctx)
+
 			start := time.Now()
 			resp, err := next(ctx, req)
 			finish := time.Now()
 
-			// 记录节点执行信息
-			graphviz.record(node, start, finish, err)
+			// 记录节点执行信息，包含 group path
+			graphviz.record(node, groupPath, start, finish, err)
 
 			return resp, err
 		}
