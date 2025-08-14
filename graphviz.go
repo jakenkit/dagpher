@@ -183,7 +183,7 @@ func (g *Graphviz) GetInfo() string {
 	// 绘制
 	graph := gographviz.NewGraph()
 	graphAst, _ := gographviz.Parse([]byte(fmt.Sprintf(`digraph G{rankdir=LR; label="%v %vms";}`,
-			g.name, totalCostMs)))
+		g.name, totalCostMs)))
 	_ = gographviz.Analyse(graphAst, graph)
 
 	// 存储 group path 到 graphviz cluster 名称的映射
@@ -206,14 +206,12 @@ func (g *Graphviz) GetInfo() string {
 			groupLabel = group.GroupPath[lastSepIndex+1:]
 		}
 
-		if groupLabel == "" {
-			groupLabel = "root"
+		if groupLabel != "" {
+			_ = graph.AddSubGraph(parentGraphName, graphName, map[string]string{
+				"label": fmt.Sprintf(`"%s\n%vms"`, groupLabel, group.MaxFinish.Sub(group.MinStart).Milliseconds()),
+				"style": "solid",
+			})
 		}
-
-		_ = graph.AddSubGraph(parentGraphName, graphName, map[string]string{
-			"label": fmt.Sprintf(`"%s\n%vms"`, groupLabel, group.MaxFinish.Sub(group.MinStart).Milliseconds()),
-			"style": "solid",
-		})
 
 		longestMap := map[DependencyNode]bool{}
 		for _, node := range group.LongestPath {
@@ -335,10 +333,6 @@ func (g *Graphviz) divideIntoGroupsByPath() []*graphGroup {
 
 	for _, node := range g.nodes {
 		groupPath := node.GroupPath
-		if groupPath == "" {
-			groupPath = "root" // 默认根组
-		}
-
 		if _, exists := groupMap[groupPath]; !exists {
 			groupMap[groupPath] = &graphGroup{
 				GroupPath: groupPath,

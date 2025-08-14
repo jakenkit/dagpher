@@ -297,8 +297,18 @@ func TestGroupExec(t *testing.T) {
 		graph.AddNode(g1.AsNode())
 		graph.AddNode(g2.AsNode())
 		graph.AddNode(g3.AsNode())
-		A, B, C, D, E = NewCalcNodes(Param{SetDep: true, SetName: 5})
-		graph.AddNode(A)
+
+		tmpA := NewNode("tmpA", func(ctx context.Context, c *Tuple2) error {
+			time.Sleep(100 * time.Millisecond)
+			return nil
+		}, "group1")
+		graph.AddNode(tmpA)
+
+		tmpB := NewNode("tmpB", func(ctx context.Context, c *Tuple2) error {
+			time.Sleep(200 * time.Millisecond)
+			return nil
+		}, "group2")
+		graph.AddNode(tmpB)
 
 		ctx, graphviz := newGraphvizBuilder("GroupExec").Build(ctx)
 		defer graphviz.Log(ctx)
