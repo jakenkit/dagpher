@@ -563,13 +563,13 @@ func TestNestedGroupDependencies(t *testing.T) {
 	dataGroup.AddNode(dbInitNode)
 
 	// 创建嵌套的数据访问子组
-	dataAccessGroup := NewGroup[int]("access")
+	dataAccessGroup := NewGroup[int]("access", "data")
 	dataAccessGroup.AddMiddleware(GraphvizMW())
 
 	repoNode := NewNode("SetupRepo", func(ctx context.Context, c int) error {
 		time.Sleep(40 * time.Millisecond)
 		return nil
-	}, "InitDB")
+	})
 
 	cacheLayerNode := NewNode("SetupCache", func(ctx context.Context, c int) error {
 		time.Sleep(30 * time.Millisecond)
@@ -610,24 +610,24 @@ func TestNestedGroupDependencies(t *testing.T) {
 	monitoringGroup.AddMiddleware(GraphvizMW())
 
 	// 监控子组中的健康检查组
-	healthGroup := NewGroup[int]("health")
+	healthGroup := NewGroup[int]("health", "StartAPI")
 	healthGroup.AddMiddleware(GraphvizMW())
 
 	healthCheckNode := NewNode("HealthCheck", func(ctx context.Context, c int) error {
 		time.Sleep(25 * time.Millisecond)
 		return nil
-	}, "StartAPI")
+	})
 
 	healthGroup.AddNode(healthCheckNode)
 
 	// 监控子组中的指标组
-	metricsGroup := NewGroup[int]("metrics")
+	metricsGroup := NewGroup[int]("metrics", "StartAPI")
 	metricsGroup.AddMiddleware(GraphvizMW())
 
 	metricsCollectorNode := NewNode("MetricsCollector", func(ctx context.Context, c int) error {
 		time.Sleep(20 * time.Millisecond)
 		return nil
-	}, "StartAPI")
+	})
 
 	metricsGroup.AddNode(metricsCollectorNode)
 

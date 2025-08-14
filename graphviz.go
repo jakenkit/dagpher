@@ -242,14 +242,23 @@ func (g *Graphviz) buildDependencyGraph() []*DependencyEdge {
 		nodeByName[node.Node.Name()] = node
 	}
 
-	// 为每个节点处理其依赖关系
+	// 用于避免重复边的map
+	edgeMap := make(map[string]bool)
+
+	// 处理所有节点的依赖关系，但容器节点的依赖会被转换
 	for _, node := range g.nodes {
 		for _, depName := range node.Dependencies {
+			// 生成边的唯一标识
+			edgeKey := fmt.Sprintf("%s->%s", depName, node.Node.Name())
+			if edgeMap[edgeKey] {
+				continue // 跳过重复的边
+			}
+
 			if depNode, exists := nodeByName[depName]; exists {
 				edge := &DependencyEdge{
-					FromNode:      depName,
-					ToNode:        node.Node.Name(),
-					EdgeType:      g.classifyEdgeType(depNode, node),
+					FromNode: depName,
+					ToNode:   node.Node.Name(),
+					EdgeType: g.classifyEdgeType(depNode, node),
 					FromGroupPath: depNode.GroupPath,
 					ToGroupPath:   node.GroupPath,
 				}
@@ -257,7 +266,14 @@ func (g *Graphviz) buildDependencyGraph() []*DependencyEdge {
 				// 判断是否跨group依赖
 				edge.GroupCross = g.isGroupCrossEdge(edge)
 
+				// 调试信息：打印边的类型
+				if edge.EdgeType == GroupToGroup {
+					fmt.Printf("DEBUG Found GroupToGroup edge: %s (%v) -> %s (%v)\n",
+						depName, depNode.IsContainer, node.Node.Name(), node.IsContainer)
+				}
+
 				edges = append(edges, edge)
+				edgeMap[edgeKey] = true
 			}
 		}
 	}
@@ -715,21 +731,43 @@ func (g *Graphviz) renderDependencyEdges(graph *gographviz.Graph, edges []*Depen
 		nodeByName[node.Node.Name()] = node
 	}
 
-	// 创建group名到group的映射
+	// 创建group名到group的映射，支持完整路径和组名两种方式
 	groupNameToGroup := make(map[string]*graphGroup)
 	for _, group := range groups {
-		groupName := group.GroupPath
+		// 使用完整的GroupPath作为key
+		groupNameToGroup[group.GroupPath] = group
+
+		// 同时使用组名（路径的最后一部分）作为key，以便匹配节点依赖
 		if lastSepIndex := strings.LastIndex(group.GroupPath, HierarchyPathJoinChar); lastSepIndex != -1 {
-			groupName = group.GroupPath[lastSepIndex+1:]
+			groupName := group.GroupPath[lastSepIndex+1:]
+			groupNameToGroup[groupName] = group
 		}
-		groupNameToGroup[groupName] = group
+
+		// 调试信息：打印group映射
+		fmt.Printf("DEBUG Group mapping: '%s' -> %s (First: %v, Last: %v)\n",
+			group.GroupPath, group.GroupPath,
+			group.First != nil, group.Last != nil)
 	}
+
+	// 调试信息：打印所有可用的group名称
+	fmt.Printf("DEBUG Available group names: ")
+	for name := range groupNameToGroup {
+		fmt.Printf("'%s' ", name)
+	}
+	fmt.Printf("\n")
 
 	// 标记最长路径上的边
 	g.markLongestEdges(edges, groups)
 
+	// 用于跟踪已绘制的边，避免重复
+	renderedEdges := make(map[string]bool)
+
 	for _, edge := range edges {
-		g.renderSingleEdge(graph, edge, nodeNames, nodeByName, groupNameToGroup)
+		edgeKey := fmt.Sprintf("%s->%s", edge.FromNode, edge.ToNode)
+		if !renderedEdges[edgeKey] {
+			g.renderSingleEdge(graph, edge, nodeNames, nodeByName, groupNameToGroup)
+			renderedEdges[edgeKey] = true
+		}
 	}
 }
 
@@ -765,12 +803,17 @@ func (g *Graphviz) renderSingleEdge(graph *gographviz.Graph, edge *DependencyEdg
 	// 根据边类型设置样式
 	switch edge.EdgeType {
 	case NodeToNode:
-		if edge.IsLongest {
-			attr["color"] = "red"
-			attr["style"] = "bold"
-		}
-		if fromNode != nil && toNode != nil {
-			_ = graph.AddEdge(nodeNames[fromNode.Node], nodeNames[toNode.Node], true, attr)
+		// 普通节点到节点的依赖 - 只有当两个节点都不是容器节点且在nodeNames中存在时才绘制
+		if fromNode != nil && toNode != nil && !fromNode.IsContainer && !toNode.IsContainer {
+			if fromNodeName, ok := nodeNames[fromNode.Node]; ok {
+				if toNodeName, ok := nodeNames[toNode.Node]; ok {
+					if edge.IsLongest {
+						attr["color"] = "red"
+						attr["style"] = "bold"
+					}
+					_ = graph.AddEdge(fromNodeName, toNodeName, true, attr)
+				}
+			}
 		}
 
 	case NodeToGroup:
@@ -779,8 +822,13 @@ func (g *Graphviz) renderSingleEdge(graph *gographviz.Graph, edge *DependencyEdg
 			attr["style"] = "dashed"
 			attr["color"] = "blue"
 			attr["label"] = fmt.Sprintf(`"%s"`, edge.ToNode)
-			if fromNode != nil {
-				_ = graph.AddEdge(nodeNames[fromNode.Node], nodeNames[depGroup.First.Node], true, attr)
+			// 只有源节点不是容器节点且在nodeNames中存在时才绘制边
+			if fromNode != nil && !fromNode.IsContainer {
+				if fromNodeName, ok := nodeNames[fromNode.Node]; ok {
+					if firstNodeName, ok := nodeNames[depGroup.First.Node]; ok {
+						_ = graph.AddEdge(fromNodeName, firstNodeName, true, attr)
+					}
+				}
 			}
 		}
 
@@ -789,9 +837,14 @@ func (g *Graphviz) renderSingleEdge(graph *gographviz.Graph, edge *DependencyEdg
 		if depGroup, exists := groupNameToGroup[edge.FromNode]; exists && depGroup.Last != nil {
 			attr["style"] = "dashed"
 			attr["color"] = "purple"
-			attr["label"] = fmt.Sprintf(`"%s -> %s"`, edge.FromNode, edge.ToNode)
-			if toNode != nil {
-				_ = graph.AddEdge(nodeNames[depGroup.Last.Node], nodeNames[toNode.Node], true, attr)
+			attr["label"] = fmt.Sprintf(`"%s->%s"`, edge.FromNode, edge.ToNode)
+			// 只有目标节点不是容器节点且在nodeNames中存在时才绘制边
+			if toNode != nil && !toNode.IsContainer {
+				if toNodeName, ok := nodeNames[toNode.Node]; ok {
+					if lastNodeName, ok := nodeNames[depGroup.Last.Node]; ok {
+						_ = graph.AddEdge(lastNodeName, toNodeName, true, attr)
+					}
+				}
 			}
 		}
 
@@ -799,11 +852,32 @@ func (g *Graphviz) renderSingleEdge(graph *gographviz.Graph, edge *DependencyEdg
 		// group到group：从源group的最后一个节点到目标group的第一个节点
 		fromGroup, fromExists := groupNameToGroup[edge.FromNode]
 		toGroup, toExists := groupNameToGroup[edge.ToNode]
+
+		// 调试信息
+		fmt.Printf("DEBUG GroupToGroup: %s -> %s, fromExists: %v, toExists: %v\n",
+			edge.FromNode, edge.ToNode, fromExists, toExists)
+		if fromExists {
+			fmt.Printf("DEBUG fromGroup: %s, Last: %v\n", fromGroup.GroupPath, fromGroup.Last != nil)
+		}
+		if toExists {
+			fmt.Printf("DEBUG toGroup: %s, First: %v\n", toGroup.GroupPath, toGroup.First != nil)
+		}
+
 		if fromExists && toExists && fromGroup.Last != nil && toGroup.First != nil {
 			attr["style"] = "dashed"
 			attr["color"] = "orange"
-			attr["label"] = fmt.Sprintf(`"%s -> %s"`, edge.FromNode, edge.ToNode)
-			_ = graph.AddEdge(nodeNames[fromGroup.Last.Node], nodeNames[toGroup.First.Node], true, attr)
+			attr["label"] = fmt.Sprintf(`"%s->%s"`, edge.FromNode, edge.ToNode)
+			// 确保两个边界节点都在nodeNames中存在
+			if lastNodeName, ok := nodeNames[fromGroup.Last.Node]; ok {
+				if firstNodeName, ok := nodeNames[toGroup.First.Node]; ok {
+					fmt.Printf("DEBUG GroupToGroup edge added: %s -> %s\n", lastNodeName, firstNodeName)
+					_ = graph.AddEdge(lastNodeName, firstNodeName, true, attr)
+				} else {
+					fmt.Printf("DEBUG GroupToGroup failed: firstNodeName not found for %s\n", toGroup.First.Node.Name())
+				}
+			} else {
+				fmt.Printf("DEBUG GroupToGroup failed: lastNodeName not found for %s\n", fromGroup.Last.Node.Name())
+			}
 		}
 	}
 }
