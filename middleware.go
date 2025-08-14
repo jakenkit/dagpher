@@ -78,9 +78,9 @@ func LoggerMW() Middleware {
 	return func(node DependencyNode, next Endpoint) Endpoint {
 		return func(ctx context.Context, req any) (any, error) {
 			start := time.Now()
-			fmt.Printf("start run node: %s[group_path: %s], start: %s, req: %v\n", node.Name(), GetCurrentGroupPath(ctx), start, req)
+			fmt.Printf("start run node: %s[deps: %v, group_path: %s], start: %s, req: %v\n", node.Name(), node.Dependencies(), GetCurrentGroupPath(ctx), start, req)
 			resp, err := next(ctx, req)
-			fmt.Printf("end run node: %s[group_path: %s], cost: %s, resp: %v, err: %v\n", node.Name(), GetCurrentGroupPath(ctx), time.Since(start), resp, err)
+			fmt.Printf("end run node: %s[deps: %v, group_path: %s], cost: %s, resp: %v, err: %v\n", node.Name(), node.Dependencies(), GetCurrentGroupPath(ctx), time.Since(start), resp, err)
 			return resp, err
 		}
 	}
