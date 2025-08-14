@@ -69,8 +69,9 @@ func (b *graphvizBuilder) Build(ctx context.Context) (context.Context, *Graphviz
 }
 
 type graphNode struct {
-	Node      DependencyNode
-	GroupPath string // 添加 group path 信息
+	Node         DependencyNode
+	GroupPath    string
+	Dependencies []string
 
 	Start  time.Time
 	Finish time.Time
@@ -79,8 +80,9 @@ type graphNode struct {
 
 func newGraphNode(node DependencyNode, groupPath string) *graphNode {
 	return &graphNode{
-		Node:      node,
-		GroupPath: groupPath,
+		Node:         node,
+		GroupPath:    groupPath,
+		Dependencies: node.Dependencies(),
 	}
 }
 
@@ -260,11 +262,31 @@ func (g *Graphviz) GetInfo() string {
 			_ = graph.AddNode(graphName, name, attr)
 		}
 
-		// 边
+	}
+
+	// 构建group name到group的映射，用于处理跨组依赖
+	groupNameToGroup := make(map[string]*graphGroup)
+	for _, group := range groups {
+		// 从group path中提取group name（最后一个部分）
+		groupName := group.GroupPath
+		if lastSepIndex := strings.LastIndex(group.GroupPath, HierarchyPathJoinChar); lastSepIndex != -1 {
+			groupName = group.GroupPath[lastSepIndex+1:]
+		}
+		groupNameToGroup[groupName] = group
+	}
+
+	// 处理所有的边关系
+	for _, group := range groups {
 		markLongestLabel := false
+		longestMap := map[DependencyNode]bool{}
+		for _, node := range group.LongestPath {
+			longestMap[node.Node] = true
+		}
+
+		// 处理组内节点依赖和跨组依赖
 		for _, node := range group.Nodes {
 			for _, depName := range node.Node.Dependencies() {
-				// 找到对应的依赖节点
+				// 首先尝试找到同名的节点依赖（组内或其他组的节点）
 				var depNode DependencyNode
 				for _, n := range g.nodes {
 					if n.Node.Name() == depName {
@@ -272,31 +294,108 @@ func (g *Graphviz) GetInfo() string {
 						break
 					}
 				}
-				if depNode == nil || !g.nodeMap[depNode] {
-					continue
-				}
-				attr := map[string]string{}
-				if longestMap[node.Node] && longestMap[depNode] {
-					attr["color"] = "red"
-					if group.LongestPath[0].Node == depNode && !markLongestLabel {
-						markLongestLabel = true
-						attr["label"] = fmt.Sprintf("Longest%vms", group.LongestCost.Milliseconds())
+
+				if depNode != nil && g.nodeMap[depNode] {
+					// 处理节点到节点的依赖
+					attr := map[string]string{}
+					if longestMap[node.Node] && longestMap[depNode] {
+						attr["color"] = "red"
+						if group.LongestPath[0].Node == depNode && !markLongestLabel {
+							markLongestLabel = true
+							attr["label"] = fmt.Sprintf("Longest%vms", group.LongestCost.Milliseconds())
+						}
+					}
+					_ = graph.AddEdge(nodeNames[depNode], nodeNames[node.Node], true, attr)
+				} else if depGroup, exists := groupNameToGroup[depName]; exists {
+					// 处理节点到组的依赖：连接被依赖group的最后节点到当前节点
+					if depGroup.Last != nil {
+						_ = graph.AddEdge(nodeNames[depGroup.Last.Node], nodeNames[node.Node], true, map[string]string{
+							"style": "dashed",
+							"color": "blue",
+							"label": fmt.Sprintf("\"%s\"", depName),
+						})
 					}
 				}
-				_ = graph.AddEdge(nodeNames[depNode], nodeNames[node.Node], true, attr)
 			}
 		}
+	}
 
-		// 上一个分组的最后一个节点, 指向当前分组第一个节点
-		if idx > 0 {
-			preNode := groups[idx-1].Last.Node
-			nextNode := group.First.Node
-			if len(group.LongestPath) > 0 && group.LongestPath[0].Start.Sub(group.First.Start) < time.Millisecond*2 {
-				nextNode = group.LongestPath[0].Node
+	// 基于记录的group节点处理group间的依赖关系
+	groupDependencies := make(map[string][]string) // groupName -> 它依赖的group names
+
+	// 遍历所有记录的节点，识别group节点并收集它们的依赖信息
+	for _, node := range g.nodes {
+		// 检查这个节点是否是一个group node（通过检查节点名是否在groupNameToGroup中存在）
+		if _, isGroupNode := groupNameToGroup[node.Node.Name()]; isGroupNode {
+			// 这是一个group节点，收集它的依赖信息
+			groupName := node.Node.Name()
+			for _, dep := range node.Dependencies {
+				// 检查依赖是否也是一个group
+				if _, exists := groupNameToGroup[dep]; exists {
+					groupDependencies[groupName] = append(groupDependencies[groupName], dep)
+				}
 			}
-			_ = graph.AddEdge(nodeNames[preNode], nodeNames[nextNode], true, map[string]string{
-				"style": "dashed",
-			})
+		} else {
+			// 这是一个普通节点，检查它是否依赖group
+			for _, dep := range node.Dependencies {
+				if _, exists := groupNameToGroup[dep]; exists {
+					// 普通节点依赖group的情况
+					nodeKey := node.Node.Name()
+					groupDependencies[nodeKey] = append(groupDependencies[nodeKey], dep)
+				}
+			}
+		}
+	}
+
+	// 根据收集到的依赖关系添加连线
+	for currentKey, depGroupNames := range groupDependencies {
+		for _, depGroupName := range depGroupNames {
+			// 找到被依赖的group
+			var depGroup *graphGroup
+			for _, g := range groups {
+				gName := g.GroupPath
+				if lastSepIndex := strings.LastIndex(g.GroupPath, HierarchyPathJoinChar); lastSepIndex != -1 {
+					gName = g.GroupPath[lastSepIndex+1:]
+				}
+				if gName == depGroupName {
+					depGroup = g
+					break
+				}
+			}
+
+			if depGroup == nil || depGroup.Last == nil {
+				continue
+			}
+
+			// 确定目标节点
+			var targetNodeName string
+			var labelSuffix string
+
+			// 检查currentKey是否是group
+			if currentGroup, exists := groupNameToGroup[currentKey]; exists {
+				// group到group的依赖
+				if currentGroup.First != nil {
+					targetNodeName = nodeNames[currentGroup.First.Node]
+					labelSuffix = currentKey
+				}
+			} else {
+				// 普通节点到group的依赖
+				for _, node := range g.nodes {
+					if node.Node.Name() == currentKey {
+						targetNodeName = nodeNames[node.Node]
+						labelSuffix = currentKey
+						break
+					}
+				}
+			}
+
+			if targetNodeName != "" {
+				_ = graph.AddEdge(nodeNames[depGroup.Last.Node], targetNodeName, true, map[string]string{
+					"style": "dashed",
+					"color": "purple",
+					"label": fmt.Sprintf("\"%s->%s\"", depGroupName, labelSuffix),
+				})
+			}
 		}
 	}
 
@@ -304,7 +403,7 @@ func (g *Graphviz) GetInfo() string {
 		path = strings.Join(Map(groups, func(group *graphGroup) string {
 			path := strings.Join(Map(group.LongestPath, func(node *graphNode) string {
 				return nodeNames[node.Node]
-			}), "->")
+			}), " -> ")
 			return fmt.Sprintf("[%v(%vms)]", path, group.LongestCost.Milliseconds())
 		}), "")
 		graphUrl = g.compressGraphUrl(fmt.Sprintf("https://dreampuf.github.io/GraphvizOnline/?presentation#%v",
@@ -378,7 +477,7 @@ func (g *Graphviz) divideIntoGroupsByPath() []*graphGroup {
 			continue
 		}
 
-		// 按时间排序节点
+		// 按开始时间排序节点，找到最早开始的节点作为First
 		for i := 0; i < len(group.Nodes)-1; i++ {
 			for j := i + 1; j < len(group.Nodes); j++ {
 				if group.Nodes[i].Start.After(group.Nodes[j].Start) {
@@ -388,10 +487,11 @@ func (g *Graphviz) divideIntoGroupsByPath() []*graphGroup {
 		}
 
 		group.First = group.Nodes[0]
-		group.Last = group.Nodes[len(group.Nodes)-1]
 		group.MinStart = group.First.Start
-		group.MaxFinish = group.Last.Finish
+		group.MaxFinish = group.Nodes[0].Finish
 
+		// 计算MinStart, MaxFinish，并按完成时间找到最晚完成的节点
+		lastByTime := group.Nodes[0]
 		for _, node := range group.Nodes {
 			if node.Start.Before(group.MinStart) {
 				group.MinStart = node.Start
@@ -399,10 +499,27 @@ func (g *Graphviz) divideIntoGroupsByPath() []*graphGroup {
 			if node.Finish.After(group.MaxFinish) {
 				group.MaxFinish = node.Finish
 			}
+			if node.Finish.After(lastByTime.Finish) {
+				lastByTime = node
+			}
 		}
 
 		// 计算最长路径
 		group.LongestPath, group.LongestCost = g.calculateLongestPath(group)
+
+		// 确定group的最后节点：优先使用关键路径的最后节点，否则使用完成时间最晚的节点
+		if len(group.LongestPath) > 0 {
+			lastInLongestPath := group.LongestPath[len(group.LongestPath)-1]
+			// 如果关键路径的最后节点与时间上的最后节点相差不大（2ms内），
+			// 则使用关键路径的最后节点，否则使用时间上的最后节点
+			if lastInLongestPath.Finish.Sub(lastByTime.Finish) > -2*time.Millisecond {
+				group.Last = lastInLongestPath
+			} else {
+				group.Last = lastByTime
+			}
+		} else {
+			group.Last = lastByTime
+		}
 	}
 
 	return groups

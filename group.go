@@ -226,12 +226,17 @@ func (g *groupExecutor[C]) Build() error {
 				}
 
 				// Add the subgroup as a container node to the parent executor
-				// Create a wrapper that adds the subgroup name to the hierarchy path
-				err := g.exec.AddContainerNode(capturedName, func(ctx context.Context, c C) error {
+				// Create a wrapper that adds the subgroup name to the hierarchy path and applies middleware
+				containerExecNode := func(ctx context.Context, c C) error {
 					// Extend hierarchy path with subgroup name
 					ctx = WithPushedHierarchyPath(ctx, subGroup.name)
 					return subGroupExec.Execute(ctx, c)
-				}, capturedNode.Dependencies()...)
+				}
+				// Wrap the container execution with middleware
+				execWithMiddleware := func(ctx context.Context, c C) error {
+					return ExecuteWithMiddleware(subGroupExec.globalMws, NewNode(capturedName, containerExecNode, capturedNode.Dependencies()...), ctx, c)
+				}
+				err := g.exec.AddContainerNode(capturedName, execWithMiddleware, capturedNode.Dependencies()...)
 				if err != nil {
 					return err
 				}
