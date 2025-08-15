@@ -249,28 +249,22 @@ func (g *Graphviz) buildDependencyGraph() []*DependencyEdge {
 	for _, node := range g.nodes {
 		for _, depName := range node.Dependencies {
 			// 生成边的唯一标识
-			edgeKey := fmt.Sprintf("%s->%s", depName, node.Node.Name())
+			edgeKey := fmt.Sprintf("%s -> %s", depName, node.Node.Name())
 			if edgeMap[edgeKey] {
 				continue // 跳过重复的边
 			}
 
 			if depNode, exists := nodeByName[depName]; exists {
 				edge := &DependencyEdge{
-					FromNode: depName,
-					ToNode:   node.Node.Name(),
-					EdgeType: g.classifyEdgeType(depNode, node),
+					FromNode:      depName,
+					ToNode:        node.Node.Name(),
+					EdgeType:      g.classifyEdgeType(depNode, node),
 					FromGroupPath: depNode.GroupPath,
 					ToGroupPath:   node.GroupPath,
 				}
 
 				// 判断是否跨group依赖
 				edge.GroupCross = g.isGroupCrossEdge(edge)
-
-				// 调试信息：打印边的类型
-				if edge.EdgeType == GroupToGroup {
-					fmt.Printf("DEBUG Found GroupToGroup edge: %s (%v) -> %s (%v)\n",
-						depName, depNode.IsContainer, node.Node.Name(), node.IsContainer)
-				}
 
 				edges = append(edges, edge)
 				edgeMap[edgeKey] = true
@@ -742,19 +736,7 @@ func (g *Graphviz) renderDependencyEdges(graph *gographviz.Graph, edges []*Depen
 			groupName := group.GroupPath[lastSepIndex+1:]
 			groupNameToGroup[groupName] = group
 		}
-
-		// 调试信息：打印group映射
-		fmt.Printf("DEBUG Group mapping: '%s' -> %s (First: %v, Last: %v)\n",
-			group.GroupPath, group.GroupPath,
-			group.First != nil, group.Last != nil)
 	}
-
-	// 调试信息：打印所有可用的group名称
-	fmt.Printf("DEBUG Available group names: ")
-	for name := range groupNameToGroup {
-		fmt.Printf("'%s' ", name)
-	}
-	fmt.Printf("\n")
 
 	// 标记最长路径上的边
 	g.markLongestEdges(edges, groups)
@@ -763,7 +745,7 @@ func (g *Graphviz) renderDependencyEdges(graph *gographviz.Graph, edges []*Depen
 	renderedEdges := make(map[string]bool)
 
 	for _, edge := range edges {
-		edgeKey := fmt.Sprintf("%s->%s", edge.FromNode, edge.ToNode)
+		edgeKey := fmt.Sprintf("%s -> %s", edge.FromNode, edge.ToNode)
 		if !renderedEdges[edgeKey] {
 			g.renderSingleEdge(graph, edge, nodeNames, nodeByName, groupNameToGroup)
 			renderedEdges[edgeKey] = true
@@ -837,7 +819,7 @@ func (g *Graphviz) renderSingleEdge(graph *gographviz.Graph, edge *DependencyEdg
 		if depGroup, exists := groupNameToGroup[edge.FromNode]; exists && depGroup.Last != nil {
 			attr["style"] = "dashed"
 			attr["color"] = "purple"
-			attr["label"] = fmt.Sprintf(`"%s->%s"`, edge.FromNode, edge.ToNode)
+			attr["label"] = fmt.Sprintf(`"%s -> %s"`, edge.FromNode, edge.ToNode)
 			// 只有目标节点不是容器节点且在nodeNames中存在时才绘制边
 			if toNode != nil && !toNode.IsContainer {
 				if toNodeName, ok := nodeNames[toNode.Node]; ok {
@@ -853,30 +835,15 @@ func (g *Graphviz) renderSingleEdge(graph *gographviz.Graph, edge *DependencyEdg
 		fromGroup, fromExists := groupNameToGroup[edge.FromNode]
 		toGroup, toExists := groupNameToGroup[edge.ToNode]
 
-		// 调试信息
-		fmt.Printf("DEBUG GroupToGroup: %s -> %s, fromExists: %v, toExists: %v\n",
-			edge.FromNode, edge.ToNode, fromExists, toExists)
-		if fromExists {
-			fmt.Printf("DEBUG fromGroup: %s, Last: %v\n", fromGroup.GroupPath, fromGroup.Last != nil)
-		}
-		if toExists {
-			fmt.Printf("DEBUG toGroup: %s, First: %v\n", toGroup.GroupPath, toGroup.First != nil)
-		}
-
 		if fromExists && toExists && fromGroup.Last != nil && toGroup.First != nil {
 			attr["style"] = "dashed"
 			attr["color"] = "orange"
-			attr["label"] = fmt.Sprintf(`"%s->%s"`, edge.FromNode, edge.ToNode)
+			attr["label"] = fmt.Sprintf(`"%s -> %s"`, edge.FromNode, edge.ToNode)
 			// 确保两个边界节点都在nodeNames中存在
 			if lastNodeName, ok := nodeNames[fromGroup.Last.Node]; ok {
 				if firstNodeName, ok := nodeNames[toGroup.First.Node]; ok {
-					fmt.Printf("DEBUG GroupToGroup edge added: %s -> %s\n", lastNodeName, firstNodeName)
 					_ = graph.AddEdge(lastNodeName, firstNodeName, true, attr)
-				} else {
-					fmt.Printf("DEBUG GroupToGroup failed: firstNodeName not found for %s\n", toGroup.First.Node.Name())
 				}
-			} else {
-				fmt.Printf("DEBUG GroupToGroup failed: lastNodeName not found for %s\n", fromGroup.Last.Node.Name())
 			}
 		}
 	}
