@@ -65,6 +65,21 @@ func (b *graphvizBuilder) Build(ctx context.Context) (context.Context, *Graphviz
 	return context.WithValue(ctx, graphvizKey{}, g), g
 }
 
+type GhBuilder struct {
+	*graphvizBuilder
+}
+
+// GraphvizBuilder 获取graphviz builder实例
+func GraphvizBuilder(name string) *GhBuilder {
+	b := &graphvizBuilder{
+		name:        name,
+		minCostMs:   0,
+		recordLimit: maxGraphNodeCount,
+		costDetail:  false,
+	}
+	return &GhBuilder{graphvizBuilder: b}
+}
+
 // graphNode 表示图中的一个节点
 type graphNode struct {
 	Node         DependencyNode

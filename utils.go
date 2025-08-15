@@ -10,6 +10,17 @@ func Map[F, T any](s []F, f func(F) T) []T {
 	return ret
 }
 
+func SliceToMap[T any, K comparable, V any](s []T, transform func(T) (K, V)) map[K]V {
+	result := make(map[K]V, len(s))
+
+	for i := range s {
+		k, v := transform(s[i])
+		result[k] = v
+	}
+
+	return result
+}
+
 func Clone[T any](s []T) []T {
 	if s == nil {
 		return nil
