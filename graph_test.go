@@ -53,14 +53,14 @@ type Namer interface {
 
 func NewCalcNodes(param Param) (A, B, C, D, E Node[*Tuple2]) {
 	setDep := func(deps ...Namer) []string {
-		if param.SetDep {
-			var depNames []string
-			for _, dep := range deps {
-				depNames = append(depNames, dep.Name())
-			}
-			return depNames
+		if !param.SetDep {
+			return nil
 		}
-		return nil
+		var depNames []string
+		for _, dep := range deps {
+			depNames = append(depNames, dep.Name())
+		}
+		return depNames
 	}
 	setName := func(name string) string {
 		if param.SetName == 0 {
