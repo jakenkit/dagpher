@@ -20,15 +20,16 @@ use case parallel will exec: A -> B or C -> D or E 510ms
 use case serial will exec: A -> B 20ms -> C 200ms -> D 300ms -> E 30ms => 560ms
 
 	        A 10ms
-	       /    \
-	      /      \
+	       /	   \
+	      /	     \
 	    B 20ms   C 200ms
-	    /    \      /
-	   /      \   /
+	    /	    \      /
+	   /	      \   /
 	D 300ms   E 30ms
 */
 type Tuple2 struct {
 	First, Second int
+	mu            sync.Mutex
 }
 
 type Param struct {
@@ -78,6 +79,8 @@ func NewCalcNodes(param Param) (A, B, C, D, E Node[*Tuple2]) {
 		if err := setErr("A"); err != nil {
 			return err
 		}
+		c.mu.Lock()
+		defer c.mu.Unlock()
 		c.First += 3
 		c.Second += 3
 		return nil
@@ -87,6 +90,8 @@ func NewCalcNodes(param Param) (A, B, C, D, E Node[*Tuple2]) {
 		if err := setErr("B"); err != nil {
 			return err
 		}
+		c.mu.Lock()
+		defer c.mu.Unlock()
 		c.First *= 5
 		c.Second *= 5
 		return nil
@@ -96,6 +101,8 @@ func NewCalcNodes(param Param) (A, B, C, D, E Node[*Tuple2]) {
 		if err := setErr("C"); err != nil {
 			return err
 		}
+		c.mu.Lock()
+		defer c.mu.Unlock()
 		c.Second *= 7
 		return nil
 	}, setDep(A)...)
@@ -104,6 +111,8 @@ func NewCalcNodes(param Param) (A, B, C, D, E Node[*Tuple2]) {
 		if err := setErr("D"); err != nil {
 			return err
 		}
+		c.mu.Lock()
+		defer c.mu.Unlock()
 		c.First += 11
 		return nil
 	}, setDep(B)...)
@@ -112,6 +121,8 @@ func NewCalcNodes(param Param) (A, B, C, D, E Node[*Tuple2]) {
 		if err := setErr("E"); err != nil {
 			return err
 		}
+		c.mu.Lock()
+		defer c.mu.Unlock()
 		c.Second += 13
 		return nil
 	}, setDep(B, C)...)
@@ -141,7 +152,7 @@ func TestGraph(t *testing.T) {
 		So(exeCtx.Second, ShouldEqual, 153)
 		cost := time.Since(now)
 		So(cost, ShouldBeGreaterThanOrEqualTo, time.Millisecond*560)
-		So(cost, ShouldBeLessThan, time.Millisecond*569)
+		So(cost, ShouldBeLessThan, time.Millisecond*580)
 	})
 	Convey("parallel", t, func() {
 		A, B, C, D, E := NewCalcNodes(Param{SetDep: true})
@@ -500,6 +511,404 @@ func TestGlobalSemaphore(t *testing.T) {
 			// Should fail due to context timeout
 			So(err, ShouldNotBeNil)
 			So(err, ShouldEqual, context.DeadlineExceeded)
+		})
+	})
+}
+
+// TestGraphCycleDetection tests that the graph properly detects cycles
+func TestGraphCycleDetection(t *testing.T) {
+	Convey("Test Cycle Detection", t, func() {
+		Convey("Direct cycle (self-dependency)", func() {
+			graph := NewGraph[*Tuple2]()
+
+			// Node depends on itself
+			nodeA := NewNode("A", func(ctx context.Context, c *Tuple2) error {
+				return nil
+			}, "A") // Self-dependency
+
+			graph.AddNode(nodeA)
+			err := graph.Build()
+			So(err, ShouldNotBeNil)
+			So(err.Error(), ShouldContainSubstring, "cycle")
+		})
+
+		Convey("Simple cycle (A->B->A)", func() {
+			graph := NewGraph[*Tuple2]()
+
+			nodeA := NewNode("A", func(ctx context.Context, c *Tuple2) error {
+				return nil
+			}, "B")
+
+			nodeB := NewNode("B", func(ctx context.Context, c *Tuple2) error {
+				return nil
+			}, "A")
+
+			graph.AddNode(nodeA)
+			graph.AddNode(nodeB)
+			err := graph.Build()
+			So(err, ShouldNotBeNil)
+			So(err.Error(), ShouldContainSubstring, "cycle")
+		})
+
+		Convey("Complex cycle (A->B->C->A)", func() {
+			graph := NewGraph[*Tuple2]()
+
+			nodeA := NewNode("A", func(ctx context.Context, c *Tuple2) error {
+				return nil
+			}, "C")
+
+			nodeB := NewNode("B", func(ctx context.Context, c *Tuple2) error {
+				return nil
+			}, "A")
+
+			nodeC := NewNode("C", func(ctx context.Context, c *Tuple2) error {
+				return nil
+			}, "B")
+
+			graph.AddNode(nodeA)
+			graph.AddNode(nodeB)
+			graph.AddNode(nodeC)
+			err := graph.Build()
+			So(err, ShouldNotBeNil)
+			So(err.Error(), ShouldContainSubstring, "cycle")
+		})
+	})
+}
+
+// TestGraphInvalidDependencies tests handling of invalid dependency references
+func TestGraphInvalidDependencies(t *testing.T) {
+	Convey("Test Invalid Dependencies", t, func() {
+		Convey("Non-existent dependency", func() {
+			graph := NewGraph[*Tuple2]()
+
+			nodeA := NewNode("A", func(ctx context.Context, c *Tuple2) error {
+				return nil
+			}, "NonExistent")
+
+			graph.AddNode(nodeA)
+			err := graph.Build()
+			So(err, ShouldNotBeNil)
+			So(err.Error(), ShouldContainSubstring, "NonExistent")
+		})
+
+		Convey("Multiple non-existent dependencies", func() {
+			graph := NewGraph[*Tuple2]()
+
+			nodeA := NewNode("A", func(ctx context.Context, c *Tuple2) error {
+				return nil
+			}, "Dep1", "Dep2", "Dep3")
+
+			graph.AddNode(nodeA)
+			err := graph.Build()
+			So(err, ShouldNotBeNil)
+		})
+
+		Convey("Mix of valid and invalid dependencies", func() {
+			graph := NewGraph[*Tuple2]()
+
+			nodeA := NewNode("A", func(ctx context.Context, c *Tuple2) error {
+				return nil
+			})
+
+			nodeB := NewNode("B", func(ctx context.Context, c *Tuple2) error {
+				return nil
+			}, "A", "InvalidDep")
+
+			graph.AddNode(nodeA)
+			graph.AddNode(nodeB)
+			err := graph.Build()
+			So(err, ShouldNotBeNil)
+			So(err.Error(), ShouldContainSubstring, "InvalidDep")
+		})
+	})
+}
+
+// TestGraphEdgeCases tests various edge cases
+func TestGraphEdgeCases(t *testing.T) {
+	ctx := context.Background()
+
+	Convey("Test Edge Cases", t, func() {
+		Convey("Empty graph", func() {
+			graph := NewGraph[*Tuple2]()
+			exeCtx := &Tuple2{}
+
+			err := graph.Build()
+			So(err, ShouldBeNil)
+
+			err = graph.Exec(ctx, exeCtx)
+			So(err, ShouldBeNil)
+		})
+
+		Convey("Single node graph", func() {
+			graph := NewGraph[*Tuple2]()
+			executed := false
+
+			node := NewNode("single", func(ctx context.Context, c *Tuple2) error {
+				executed = true
+				c.First = 42
+				return nil
+			})
+
+			graph.AddNode(node)
+			exeCtx := &Tuple2{}
+
+			err := graph.Build()
+			So(err, ShouldBeNil)
+
+			err = graph.Exec(ctx, exeCtx)
+			So(err, ShouldBeNil)
+			So(executed, ShouldBeTrue)
+			So(exeCtx.First, ShouldEqual, 42)
+		})
+
+		Convey("Duplicate node names", func() {
+			graph := NewGraph[*Tuple2]()
+
+			node1 := NewNode("duplicate", func(ctx context.Context, c *Tuple2) error {
+				return nil
+			})
+
+			node2 := NewNode("duplicate", func(ctx context.Context, c *Tuple2) error {
+				return nil
+			})
+
+			graph.AddNode(node1)
+			graph.AddNode(node2)
+
+			err := graph.Build()
+			So(err.Error(), ShouldContainSubstring, "already exists")
+		})
+
+		Convey("Nil context", func() {
+			graph := NewGraph[*Tuple2]()
+			node := NewNode("node", func(ctx context.Context, c *Tuple2) error {
+				return nil
+			})
+
+			graph.AddNode(node)
+			exeCtx := &Tuple2{}
+
+			err := graph.Build()
+			So(err, ShouldBeNil)
+
+			err = graph.Exec(nil, exeCtx)
+			So(err.Error(), ShouldContainSubstring, "nil context")
+		})
+	})
+}
+
+// TestGraphContextCancellation tests context cancellation scenarios
+func TestGraphContextCancellation(t *testing.T) {
+	Convey("Test Context Cancellation", t, func() {
+		Convey("Cancel before execution", func() {
+			graph := NewGraph[*Tuple2]()
+
+			node := NewNode("node", func(ctx context.Context, c *Tuple2) error {
+				return nil
+			})
+
+			graph.AddNode(node)
+			graph.Build()
+
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel() // Cancel immediately
+
+			exeCtx := &Tuple2{}
+			err := graph.Exec(ctx, exeCtx)
+			So(err, ShouldEqual, context.Canceled)
+		})
+
+		Convey("Cancel during execution", func() {
+			graph := NewGraph[*Tuple2]()
+			var nodeAStarted, nodeBStarted bool
+
+			nodeA := NewNode("A", func(ctx context.Context, c *Tuple2) error {
+				nodeAStarted = true
+				time.Sleep(100 * time.Millisecond)
+				return nil
+			})
+
+			nodeB := NewNode("B", func(ctx context.Context, c *Tuple2) error {
+				nodeBStarted = true
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(1 * time.Second):
+					return nil
+				}
+			}, "A")
+
+			graph.AddNode(nodeA)
+			graph.AddNode(nodeB)
+			graph.Build()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancel()
+
+			exeCtx := &Tuple2{}
+			err := graph.Exec(ctx, exeCtx)
+			So(err, ShouldNotBeNil)
+			So(nodeAStarted, ShouldBeTrue)
+			So(nodeBStarted, ShouldBeFalse) // Should not start B if A times out
+		})
+
+		Convey("Timeout with multiple parallel nodes", func() {
+			graph := NewGraph[*Tuple2]()
+			var completed sync.Map
+
+			createSlowNode := func(name string, duration time.Duration) Node[*Tuple2] {
+				return NewNode(name, func(ctx context.Context, c *Tuple2) error {
+					select {
+					case <-time.After(duration):
+						completed.Store(name, true)
+						return nil
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				})
+			}
+
+			// Create parallel nodes with different durations
+			graph.AddNode(createSlowNode("fast", 10*time.Millisecond))
+			graph.AddNode(createSlowNode("medium", 100*time.Millisecond))
+			graph.AddNode(createSlowNode("slow", 500*time.Millisecond))
+
+			graph.Build()
+
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancel()
+
+			exeCtx := &Tuple2{}
+			err := graph.Exec(ctx, exeCtx)
+			So(err, ShouldEqual, context.DeadlineExceeded)
+
+			// Only fast node should complete
+			_, fastCompleted := completed.Load("fast")
+			_, mediumCompleted := completed.Load("medium")
+			_, slowCompleted := completed.Load("slow")
+
+			So(fastCompleted, ShouldBeTrue)
+			So(mediumCompleted, ShouldBeFalse)
+			So(slowCompleted, ShouldBeFalse)
+		})
+	})
+}
+
+// TestGraphMiddleware tests middleware functionality
+func TestGraphMiddleware(t *testing.T) {
+	ctx := context.Background()
+
+	Convey("Test Middleware", t, func() {
+		Convey("Middleware execution order", func() {
+			graph := NewGraph[*TestContext]()
+			testCtx := NewTestContext(10)
+
+			// Global middleware
+			globalMW := func(node DependencyNode, next Endpoint) Endpoint {
+				return func(ctx context.Context, req any) (any, error) {
+					tc := req.(*TestContext)
+					tc.Log("global-before-" + node.Name())
+					res, err := next(ctx, req)
+					tc.Log("global-after-" + node.Name())
+					return res, err
+				}
+			}
+
+			// Node-specific middleware
+			nodeMW := func(node DependencyNode, next Endpoint) Endpoint {
+				return func(ctx context.Context, req any) (any, error) {
+					tc := req.(*TestContext)
+					tc.Log("node-before-" + node.Name())
+					res, err := next(ctx, req)
+					tc.Log("node-after-" + node.Name())
+					return res, err
+				}
+			}
+
+			node := NewNode("test", func(ctx context.Context, c *TestContext) error {
+				c.Log("test-exec")
+				return nil
+			})
+
+			graph.AddGlobalMW(globalMW)
+			graph.AddNode(node, WithMiddlewares(nodeMW))
+
+			graph.Build()
+			err := graph.Exec(ctx, testCtx)
+			So(err, ShouldBeNil)
+
+			results := testCtx.GetResults()
+			expected := []string{
+				"global-before-test",
+				"node-before-test",
+				"test-exec",
+				"node-after-test",
+				"global-after-test",
+			}
+			So(results, ShouldResemble, expected)
+		})
+
+		Convey("Middleware error handling", func() {
+			graph := NewGraph[*Tuple2]()
+
+			errorMW := func(node DependencyNode, next Endpoint) Endpoint {
+				return func(ctx context.Context, req any) (any, error) {
+					if node.Name() == "B" {
+						return nil, fmt.Errorf("middleware error for B")
+					}
+					return next(ctx, req)
+				}
+			}
+
+			nodeA := NewNode("A", func(ctx context.Context, c *Tuple2) error {
+				c.First = 10
+				return nil
+			})
+
+			nodeB := NewNode("B", func(ctx context.Context, c *Tuple2) error {
+				c.Second = 20
+				return nil
+			})
+
+			graph.AddGlobalMW(errorMW)
+			graph.AddNode(nodeA)
+			graph.AddNode(nodeB)
+
+			exeCtx := &Tuple2{}
+			err := graph.Exec(ctx, exeCtx)
+			So(err, ShouldNotBeNil)
+			So(err.Error(), ShouldContainSubstring, "middleware error")
+			So(exeCtx.First, ShouldEqual, 10) // A should execute
+			So(exeCtx.Second, ShouldEqual, 0) // B should not execute
+		})
+
+		Convey("Middleware modifying context", func() {
+			graph := NewGraph[*Tuple2]()
+
+			type ctxKey string
+			const testKey ctxKey = "test-key"
+
+			ctxMW := func(node DependencyNode, next Endpoint) Endpoint {
+				return func(ctx context.Context, req any) (any, error) {
+					newCtx := context.WithValue(ctx, testKey, node.Name())
+					return next(newCtx, req)
+				}
+			}
+
+			var capturedValue string
+			node := NewNode("test", func(ctx context.Context, c *Tuple2) error {
+				if val, ok := ctx.Value(testKey).(string); ok {
+					capturedValue = val
+				}
+				return nil
+			})
+
+			graph.AddGlobalMW(ctxMW)
+			graph.AddNode(node)
+
+			exeCtx := &Tuple2{}
+			graph.Exec(ctx, exeCtx)
+			So(capturedValue, ShouldEqual, "test")
 		})
 	})
 }

@@ -3,6 +3,8 @@ package executor
 import (
 	"context"
 	"errors"
+	"fmt"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -176,6 +178,9 @@ func (e *Engine[C]) Build() error {
 }
 
 func (e *Engine[C]) Execute(ctx context.Context, c C) error {
+	if ctx == nil {
+		return errors.New("nil context")
+	}
 	e.mu.RLock()
 	rootNodesCopy := make([]string, len(e.rootNode))
 	copy(rootNodesCopy, e.rootNode)
@@ -188,13 +193,18 @@ func (e *Engine[C]) Execute(ctx context.Context, c C) error {
 
 	for _, name := range rootNodesCopy {
 		nodeToRun := name // Capture loop variable to prevent race condition.
-		eg.Go(func() error {
+		eg.Go(func() (err error) {
+			defer func() {
+				if r := recover(); r != nil {
+					err = fmt.Errorf("panic recovered in node %s: %v\n%s", nodeToRun, r, debug.Stack())
+				}
+			}()
 			return e.executeNode(gCtx, nodeToRun, c, eg)
 		})
 	}
-	
+
 	err := eg.Wait()
-	
+
 	// Ensure all node completion channels are closed on cancellation
 	if ctx.Err() != nil {
 		e.mu.RLock()
@@ -203,7 +213,7 @@ func (e *Engine[C]) Execute(ctx context.Context, c C) error {
 		}
 		e.mu.RUnlock()
 	}
-	
+
 	return err
 }
 
@@ -213,7 +223,7 @@ func (e *Engine[C]) executeNode(ctx context.Context, name string, c C, eg *errgr
 	}
 
 	start := time.Now()
-	
+
 	e.mu.RLock()
 	stat := e.nodeStat[name]
 	execFunc := e.nodeExec[name]
@@ -241,14 +251,19 @@ func (e *Engine[C]) executeNode(ctx context.Context, name string, c C, eg *errgr
 		e.mu.RLock()
 		nextStat := e.nodeStat[next]
 		e.mu.RUnlock()
-		
+
 		if nextStat == nil {
 			continue // Should not happen with a successful Build()
 		}
 
 		if atomic.AddInt32(&nextStat.degree, -1) == 0 {
 			nodeToRun := next // Capture loop variable to prevent race condition.
-			eg.Go(func() error {
+			eg.Go(func() (err error) {
+				defer func() {
+					if r := recover(); r != nil {
+						err = fmt.Errorf("panic recovered in node %s: %v\n%s", nodeToRun, r, debug.Stack())
+					}
+				}()
 				return e.executeNode(ctx, nodeToRun, c, eg)
 			})
 		}

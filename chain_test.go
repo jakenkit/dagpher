@@ -11,7 +11,7 @@ import (
 
 func TestChainBasicExecution(t *testing.T) {
 	ctx := context.Background()
-	testCtx := &TestContext{}
+	testCtx := NewTestContext(3)
 
 	// Create chain
 	chain := NewChain[*TestContext]()
@@ -41,20 +41,21 @@ func TestChainBasicExecution(t *testing.T) {
 
 	// Verify execution order
 	expected := []string{"node1", "node2", "node3"}
-	if len(testCtx.executionOrder) != len(expected) {
-		t.Fatalf("Expected %d executions, got %d", len(expected), len(testCtx.executionOrder))
+	results := testCtx.GetResults()
+	if len(results) != len(expected) {
+		t.Fatalf("Expected %d executions, got %d", len(expected), len(results))
 	}
 
 	for i, expectedName := range expected {
-		if testCtx.executionOrder[i] != expectedName {
-			t.Errorf("Expected execution %d to be %s, got %s", i, expectedName, testCtx.executionOrder[i])
+		if results[i] != expectedName {
+			t.Errorf("Expected execution %d to be %s, got %s", i, expectedName, results[i])
 		}
 	}
 }
 
 func TestChainWithGroups(t *testing.T) {
 	ctx := context.Background()
-	testCtx := &TestContext{}
+	testCtx := NewTestContext(4)
 
 	// Create a group
 	group := NewGroup[*TestContext]("test-group")
@@ -89,24 +90,25 @@ func TestChainWithGroups(t *testing.T) {
 		t.Fatalf("Failed to execute chain: %v", err)
 	}
 
+	results := testCtx.GetResults()
 	// Verify that before-group executed first and after-group executed last
-	if len(testCtx.executionOrder) < 3 {
-		t.Fatalf("Expected at least 3 executions, got %d", len(testCtx.executionOrder))
+	if len(results) < 3 {
+		t.Fatalf("Expected at least 3 executions, got %d", len(results))
 	}
 
-	if testCtx.executionOrder[0] != "before-group" {
-		t.Errorf("Expected first execution to be 'before-group', got %s", testCtx.executionOrder[0])
+	if results[0] != "before-group" {
+		t.Errorf("Expected first execution to be 'before-group', got %s", results[0])
 	}
 
-	lastIndex := len(testCtx.executionOrder) - 1
-	if testCtx.executionOrder[lastIndex] != "after-group" {
-		t.Errorf("Expected last execution to be 'after-group', got %s", testCtx.executionOrder[lastIndex])
+	lastIndex := len(results) - 1
+	if results[lastIndex] != "after-group" {
+		t.Errorf("Expected last execution to be 'after-group', got %s", results[lastIndex])
 	}
 }
 
 func TestChainWithMiddleware(t *testing.T) {
 	ctx := context.Background()
-	testCtx := &TestContext{}
+	testCtx := NewTestContext(3)
 
 	// Create middleware that adds prefix
 	prefixMW := func() Middleware {
@@ -148,20 +150,21 @@ func TestChainWithMiddleware(t *testing.T) {
 
 	// Verify middleware execution
 	expected := []string{"mw-before-test-node", "test-node", "mw-after-test-node"}
-	if len(testCtx.executionOrder) != len(expected) {
-		t.Fatalf("Expected %d executions, got %d: %v", len(expected), len(testCtx.executionOrder), testCtx.executionOrder)
+	results := testCtx.GetResults()
+	if len(results) != len(expected) {
+		t.Fatalf("Expected %d executions, got %d: %v", len(expected), len(results), results)
 	}
 
 	for i, expectedName := range expected {
-		if testCtx.executionOrder[i] != expectedName {
-			t.Errorf("Expected execution %d to be %s, got %s", i, expectedName, testCtx.executionOrder[i])
+		if results[i] != expectedName {
+			t.Errorf("Expected execution %d to be %s, got %s", i, expectedName, results[i])
 		}
 	}
 }
 
 func TestChainConcurrencyControl(t *testing.T) {
 	ctx := context.Background()
-	testCtx := &TestContext{}
+	testCtx := NewTestContext(6)
 
 	// Create chain with maxGoNum=1 (serial execution)
 	chain := NewChain[*TestContext]()
@@ -194,15 +197,16 @@ func TestChainConcurrencyControl(t *testing.T) {
 		t.Errorf("Expected execution to take at least 30ms, took %v", duration)
 	}
 
+	results := testCtx.GetResults()
 	// Verify execution order is maintained
-	if len(testCtx.executionOrder) != 6 {
-		t.Fatalf("Expected 6 executions, got %d: %v", len(testCtx.executionOrder), testCtx.executionOrder)
+	if len(results) != 6 {
+		t.Fatalf("Expected 6 executions, got %d: %v", len(results), results)
 	}
 }
 
 func TestChainErrorHandling(t *testing.T) {
 	ctx := context.Background()
-	testCtx := &TestContext{}
+	testCtx := NewTestContext(2)
 
 	// Create chain with a failing node
 	chain := NewChain[*TestContext]()
@@ -231,13 +235,14 @@ func TestChainErrorHandling(t *testing.T) {
 
 	// Verify that execution stopped at the failing node
 	expected := []string{"node1", "failing-node"}
-	if len(testCtx.executionOrder) != len(expected) {
-		t.Fatalf("Expected %d executions, got %d: %v", len(expected), len(testCtx.executionOrder), testCtx.executionOrder)
+	results := testCtx.GetResults()
+	if len(results) != len(expected) {
+		t.Fatalf("Expected %d executions, got %d: %v", len(expected), len(results), results)
 	}
 
 	for i, expectedName := range expected {
-		if testCtx.executionOrder[i] != expectedName {
-			t.Errorf("Expected execution %d to be %s, got %s", i, expectedName, testCtx.executionOrder[i])
+		if results[i] != expectedName {
+			t.Errorf("Expected execution %d to be %s, got %s", i, expectedName, results[i])
 		}
 	}
 }

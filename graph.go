@@ -16,6 +16,7 @@ type Graph[C any] struct {
 	globalMws []Middleware
 	group     *Group[C]
 	maxGoNum  int
+	built     bool
 
 	globalSem *semaphore.Weighted
 }
@@ -41,7 +42,6 @@ func (g *Graph[C]) SetMaxGoNum(maxGoNum int) *Graph[C] {
 
 func (g *Graph[C]) AddGlobalMW(mws ...Middleware) *Graph[C] {
 	g.globalMws = append(g.globalMws, mws...)
-	g.group.AddMiddleware(mws...)
 	return g
 }
 
@@ -59,10 +59,23 @@ func (g *Graph[C]) Build() error {
 	g.group.AddMiddleware(g.globalMws...)
 	g.group.SetGlobalSem(g.globalSem)
 
-	return g.group.Build()
+	err := g.group.Build()
+	if err != nil {
+		return err
+	}
+
+	g.built = true
+	return nil
 }
 
 // Exec executes the graph with hierarchy context initialized
 func (g *Graph[C]) Exec(ctx context.Context, execCtx C) error {
+	if !g.built {
+		err := g.Build()
+		if err != nil {
+			return err
+		}
+	}
+
 	return g.group.Exec(ctx, execCtx)
 }

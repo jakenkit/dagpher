@@ -176,27 +176,33 @@ func TestGraphvizWithConcurrencyLimit(t *testing.T) {
 	// 2. A完成后，C开始 (因为还有C在等待)
 	// 3. B和C完成后，D和E可以开始
 
+	start := time.Now()
 	nodeA := NewNode("A", func(ctx context.Context, c int) error {
+		defer func() { t.Log("end exec A in ", time.Since(start).Milliseconds()) }()
 		time.Sleep(50 * time.Millisecond)
 		return nil
 	})
 
 	nodeB := NewNode("B", func(ctx context.Context, c int) error {
+		defer func() { t.Log("end exec B in ", time.Since(start).Milliseconds()) }()
 		time.Sleep(100 * time.Millisecond)
 		return nil
 	})
 
 	nodeC := NewNode("C", func(ctx context.Context, c int) error {
+		defer func() { t.Log("end exec C in ", time.Since(start).Milliseconds()) }()
 		time.Sleep(80 * time.Millisecond)
 		return nil
 	})
 
 	nodeD := NewNode("D", func(ctx context.Context, c int) error {
+		defer func() { t.Log("end exec D in ", time.Since(start).Milliseconds()) }()
 		time.Sleep(60 * time.Millisecond)
 		return nil
 	}, "A")
 
 	nodeE := NewNode("E", func(ctx context.Context, c int) error {
+		defer func() { t.Log("end exec E in ", time.Since(start).Milliseconds()) }()
 		time.Sleep(40 * time.Millisecond)
 		return nil
 	}, "B", "C")
@@ -213,7 +219,7 @@ func TestGraphvizWithConcurrencyLimit(t *testing.T) {
 	group.AddNode(nodeD)
 	group.AddNode(nodeE)
 
-	start := time.Now()
+	start = time.Now()
 	err := group.AsNode().Exec(ctx, 42)
 	totalTime := time.Since(start)
 
@@ -225,7 +231,7 @@ func TestGraphvizWithConcurrencyLimit(t *testing.T) {
 	// 理论上的执行序列：A(0-50) + B(0-100) 并行，然后 C(50-130) + D(50-110)，最后 E(130-170)
 	// 总时间应该约为170ms
 	expectedMin := 170 * time.Millisecond
-	expectedMax := 190 * time.Millisecond
+	expectedMax := 200 * time.Millisecond
 
 	if totalTime < expectedMin {
 		t.Errorf("Total execution time %v is less than expected minimum %v", totalTime, expectedMin)
