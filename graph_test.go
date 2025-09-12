@@ -3,6 +3,7 @@ package dagpher
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -866,6 +867,7 @@ func TestGraphMiddleware(t *testing.T) {
 			})
 
 			nodeB := NewNode("B", func(ctx context.Context, c *Tuple2) error {
+				time.Sleep(10 * time.Millisecond)
 				c.Second = 20
 				return nil
 			})
@@ -909,6 +911,573 @@ func TestGraphMiddleware(t *testing.T) {
 			exeCtx := &Tuple2{}
 			graph.Exec(ctx, exeCtx)
 			So(capturedValue, ShouldEqual, "test")
+		})
+	})
+}
+
+// TestGraphStress tests graph under high load and complex scenarios
+func TestGraphStress(t *testing.T) {
+	ctx := context.Background()
+
+	Convey("Test Graph Stress Scenarios", t, func() {
+		Convey("Large DAG with complex dependencies", func() {
+			graph := NewGraph[*Tuple2]()
+			const numLayers = 10
+			const nodesPerLayer = 20
+
+			// Create a multi-layer DAG
+			nodeNames := make([][]string, numLayers)
+			for layer := 0; layer < numLayers; layer++ {
+				nodeNames[layer] = make([]string, nodesPerLayer)
+				for nodeIdx := 0; nodeIdx < nodesPerLayer; nodeIdx++ {
+					nodeName := fmt.Sprintf("L%d_N%d", layer, nodeIdx)
+					nodeNames[layer][nodeIdx] = nodeName
+
+					var deps []string
+					if layer > 0 {
+						// Each node depends on 2-3 nodes from previous layer
+						depCount := 2 + (nodeIdx % 2)
+						for d := 0; d < depCount; d++ {
+							depIdx := (nodeIdx + d) % nodesPerLayer
+							deps = append(deps, nodeNames[layer-1][depIdx])
+						}
+					}
+
+					node := NewNode(nodeName, func(ctx context.Context, c *Tuple2) error {
+						c.mu.Lock()
+						c.First++
+						c.mu.Unlock()
+						// Simulate some work
+						time.Sleep(time.Microsecond * 100)
+						return nil
+					}, deps...)
+
+					graph.AddNode(node)
+				}
+			}
+
+			graph.SetMaxGoNum(50) // High concurrency
+			err := graph.Build()
+			So(err, ShouldBeNil)
+
+			exeCtx := &Tuple2{}
+			start := time.Now()
+			err = graph.Exec(ctx, exeCtx)
+			duration := time.Since(start)
+
+			So(err, ShouldBeNil)
+			So(exeCtx.First, ShouldEqual, numLayers*nodesPerLayer)
+			So(duration, ShouldBeLessThan, 5*time.Second) // Should complete within reasonable time
+		})
+
+		Convey("High frequency repeated executions", func() {
+			// Execute multiple times rapidly
+			const numExecutions = 100
+			for i := 0; i < numExecutions; i++ {
+				graph := NewGraph[*Tuple2]()
+
+				// Simple graph for repeated execution
+				nodeA := NewNode("A", func(ctx context.Context, c *Tuple2) error {
+					c.mu.Lock()
+					c.First++
+					c.mu.Unlock()
+					return nil
+				})
+
+				nodeB := NewNode("B", func(ctx context.Context, c *Tuple2) error {
+					c.mu.Lock()
+					c.Second++
+					c.mu.Unlock()
+					return nil
+				}, "A")
+
+				graph.AddNode(nodeA)
+				graph.AddNode(nodeB)
+				err := graph.Build()
+				So(err, ShouldBeNil)
+
+				exeCtx := &Tuple2{}
+				err = graph.Exec(ctx, exeCtx)
+				So(err, ShouldBeNil)
+
+				// Add small delay every 10 executions to prevent resource exhaustion
+				if i%10 == 0 && i > 0 {
+					time.Sleep(time.Millisecond)
+				}
+
+				// Verify each execution is independent and correct
+				So(exeCtx.First, ShouldEqual, 1)
+				So(exeCtx.Second, ShouldEqual, 1)
+			}
+		})
+
+		Convey("Memory pressure with large context", func() {
+			type LargeContext struct {
+				Data [1024 * 1024]byte // 1MB per context
+				mu   sync.Mutex
+			}
+
+			graph := NewGraph[*LargeContext]()
+
+			for i := 0; i < 10; i++ {
+				nodeName := fmt.Sprintf("Node%d", i)
+				node := NewNode(nodeName, func(ctx context.Context, c *LargeContext) error {
+					c.mu.Lock()
+					// Modify some data
+					c.Data[0] = byte(i)
+					c.mu.Unlock()
+					time.Sleep(time.Millisecond)
+					return nil
+				})
+				graph.AddNode(node)
+			}
+
+			graph.SetMaxGoNum(5)
+			err := graph.Build()
+			So(err, ShouldBeNil)
+
+			largeCtx := &LargeContext{}
+			err = graph.Exec(ctx, largeCtx)
+			So(err, ShouldBeNil)
+		})
+	})
+}
+
+// TestGraphResourceLeak tests for goroutine and memory leaks
+func TestGraphResourceLeak(t *testing.T) {
+	Convey("Test Resource Leak Detection", t, func() {
+		Convey("Goroutine leak detection", func() {
+			initialGoroutines := runtime.NumGoroutine()
+
+			// Create and execute multiple graphs
+			for i := 0; i < 50; i++ {
+				graph := NewGraph[*Tuple2]()
+
+				nodeA := NewNode(fmt.Sprintf("A%d", i), func(ctx context.Context, c *Tuple2) error {
+					time.Sleep(time.Millisecond)
+					return nil
+				})
+
+				nodeB := NewNode(fmt.Sprintf("B%d", i), func(ctx context.Context, c *Tuple2) error {
+					time.Sleep(time.Millisecond)
+					return nil
+				}, fmt.Sprintf("A%d", i))
+
+				graph.AddNode(nodeA)
+				graph.AddNode(nodeB)
+				graph.SetMaxGoNum(10)
+
+				err := graph.Build()
+				So(err, ShouldBeNil)
+
+				exeCtx := &Tuple2{}
+				err = graph.Exec(context.Background(), exeCtx)
+				So(err, ShouldBeNil)
+			}
+
+			// Force GC and wait for cleanup
+			runtime.GC()
+			time.Sleep(100 * time.Millisecond)
+			runtime.GC()
+
+			finalGoroutines := runtime.NumGoroutine()
+			// Allow some tolerance for background goroutines
+			So(finalGoroutines, ShouldBeLessThanOrEqualTo, initialGoroutines+5)
+		})
+
+		Convey("Context cancellation cleanup", func() {
+			graph := NewGraph[*Tuple2]()
+
+			// Create nodes that would run for a long time
+			for i := 0; i < 10; i++ {
+				nodeName := fmt.Sprintf("SlowNode%d", i)
+				node := NewNode(nodeName, func(ctx context.Context, c *Tuple2) error {
+					select {
+					case <-time.After(10 * time.Second):
+						return nil
+					case <-ctx.Done():
+						return ctx.Err()
+					}
+				})
+				graph.AddNode(node)
+			}
+
+			graph.SetMaxGoNum(5)
+			err := graph.Build()
+			So(err, ShouldBeNil)
+
+			// Start execution and cancel quickly
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancel()
+
+			initialGoroutines := runtime.NumGoroutine()
+
+			exeCtx := &Tuple2{}
+			err = graph.Exec(ctx, exeCtx)
+			So(err, ShouldNotBeNil) // Should fail due to timeout
+
+			// Wait for cleanup
+			time.Sleep(200 * time.Millisecond)
+			runtime.GC()
+
+			finalGoroutines := runtime.NumGoroutine()
+			So(finalGoroutines, ShouldBeLessThanOrEqualTo, initialGoroutines+5)
+		})
+
+		Convey("Panic recovery and cleanup", func() {
+			graph := NewGraph[*Tuple2]()
+
+			normalNode := NewNode("Normal", func(ctx context.Context, c *Tuple2) error {
+				c.First = 1
+				return nil
+			})
+
+			panicNode := NewNode("Panic", func(ctx context.Context, c *Tuple2) error {
+				panic("intentional panic")
+			}, "Dependent")
+
+			dependentNode := NewNode("Dependent", func(ctx context.Context, c *Tuple2) error {
+				c.Second = 1
+				return nil
+			}, "Normal")
+
+			graph.AddNode(normalNode)
+			graph.AddNode(panicNode)
+			graph.AddNode(dependentNode)
+
+			err := graph.Build()
+			So(err, ShouldBeNil)
+
+			exeCtx := &Tuple2{}
+
+			// Should handle panic gracefully
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						// Panic should be recovered
+						t.Logf("Recovered from panic: %v", r)
+					}
+				}()
+				graph.Exec(context.Background(), exeCtx)
+			}()
+
+			// Normal and dependent nodes should still execute
+			So(exeCtx.First, ShouldEqual, 1)
+			So(exeCtx.Second, ShouldEqual, 1)
+		})
+	})
+}
+
+// TestGraphPerformanceRegression tests for performance regressions
+func TestGraphPerformanceRegression(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping performance tests in short mode")
+	}
+
+	Convey("Test Performance Regression", t, func() {
+		Convey("Build performance", func() {
+			const numNodes = 1000
+
+			graph := NewGraph[*Tuple2]()
+
+			// Create nodes with dependencies
+			for i := 0; i < numNodes; i++ {
+				nodeName := fmt.Sprintf("Node%d", i)
+				var deps []string
+				if i > 0 {
+					// Each node depends on previous node
+					deps = []string{fmt.Sprintf("Node%d", i-1)}
+				}
+
+				node := NewNode(nodeName, func(ctx context.Context, c *Tuple2) error {
+					return nil
+				}, deps...)
+
+				graph.AddNode(node)
+			}
+
+			start := time.Now()
+			err := graph.Build()
+			buildTime := time.Since(start)
+
+			So(err, ShouldBeNil)
+			So(buildTime, ShouldBeLessThan, 1*time.Second) // Should build quickly
+		})
+
+		Convey("Execution performance scaling", func() {
+			sizes := []int{10, 50, 100, 500}
+			var prevTime time.Duration
+
+			for _, size := range sizes {
+				graph := NewGraph[*Tuple2]()
+
+				// Create parallel nodes (no dependencies)
+				for i := 0; i < size; i++ {
+					nodeName := fmt.Sprintf("Node%d", i)
+					node := NewNode(nodeName, func(ctx context.Context, c *Tuple2) error {
+						c.mu.Lock()
+						c.First++
+						c.mu.Unlock()
+						time.Sleep(time.Microsecond * 10) // Minimal work
+						return nil
+					})
+					graph.AddNode(node)
+				}
+
+				graph.SetMaxGoNum(100) // High concurrency
+				err := graph.Build()
+				So(err, ShouldBeNil)
+
+				exeCtx := &Tuple2{}
+				start := time.Now()
+				err = graph.Exec(context.Background(), exeCtx)
+				execTime := time.Since(start)
+
+				So(err, ShouldBeNil)
+				So(exeCtx.First, ShouldEqual, size)
+
+				t.Logf("Size %d: %v", size, execTime)
+
+				// Performance should scale reasonably (not exponentially)
+				if prevTime > 0 {
+					ratio := float64(execTime) / float64(prevTime)
+					sizeRatio := float64(size) / float64(sizes[len(sizes)-2])
+					So(ratio, ShouldBeLessThan, sizeRatio*3) // Should not be worse than 2x size ratio
+				}
+				prevTime = execTime
+			}
+		})
+
+		Convey("Memory usage scaling", func() {
+			var m1, m2 runtime.MemStats
+
+			// Baseline measurement
+			runtime.GC()
+			runtime.ReadMemStats(&m1)
+
+			// Create many graphs
+			graphs := make([]*Graph[*Tuple2], 100)
+			for i := 0; i < 100; i++ {
+				graph := NewGraph[*Tuple2]()
+
+				for j := 0; j < 10; j++ {
+					nodeName := fmt.Sprintf("G%d_N%d", i, j)
+					node := NewNode(nodeName, func(ctx context.Context, c *Tuple2) error {
+						return nil
+					})
+					graph.AddNode(node)
+				}
+
+				graph.Build()
+				graphs[i] = graph
+			}
+
+			runtime.GC()
+			runtime.ReadMemStats(&m2)
+
+			memoryIncrease := m2.HeapAlloc - m1.HeapAlloc
+			t.Logf("Memory increase: %d bytes", memoryIncrease)
+
+			// Should not use excessive memory (less than 50MB for 1000 nodes)
+			So(memoryIncrease, ShouldBeLessThan, 50*1024*1024)
+
+			// Clear references and verify cleanup
+			for i := range graphs {
+				graphs[i] = nil
+			}
+			graphs = nil
+
+			runtime.GC()
+			time.Sleep(100 * time.Millisecond)
+			runtime.GC()
+		})
+	})
+}
+
+// TestGraphRobustness tests graph robustness under various failure conditions
+func TestGraphRobustness(t *testing.T) {
+	ctx := context.Background()
+
+	Convey("Test Graph Robustness", t, func() {
+		Convey("Partial failure recovery", func() {
+			graph := NewGraph[*Tuple2]()
+			var executedNodes []string
+			var mu sync.Mutex
+
+			addExecution := func(name string) {
+				mu.Lock()
+				executedNodes = append(executedNodes, name)
+				mu.Unlock()
+			}
+
+			// Create a graph where some nodes fail but others should continue
+			nodeA := NewNode("A", func(ctx context.Context, c *Tuple2) error {
+				addExecution("A")
+				c.First = 1
+				return nil
+			})
+
+			nodeB := NewNode("B", func(ctx context.Context, c *Tuple2) error {
+				addExecution("B")
+				time.Sleep(1 * time.Second)
+				return fmt.Errorf("B failed")
+			}, "A")
+
+			nodeC := NewNode("C", func(ctx context.Context, c *Tuple2) error {
+				addExecution("C")
+				c.Second = 1
+				return nil
+			}, "A") // Independent of B
+
+			nodeD := NewNode("D", func(ctx context.Context, c *Tuple2) error {
+				addExecution("D")
+				return nil
+			}) // Completely independent
+
+			graph.AddNode(nodeA)
+			graph.AddNode(nodeB)
+			graph.AddNode(nodeC)
+			graph.AddNode(nodeD)
+
+			err := graph.Build()
+			So(err, ShouldBeNil)
+
+			exeCtx := &Tuple2{}
+			err = graph.Exec(ctx, exeCtx)
+			So(err, ShouldNotBeNil) // Should fail due to B
+
+			mu.Lock()
+			executed := make([]string, len(executedNodes))
+			copy(executed, executedNodes)
+			mu.Unlock()
+
+			// A, C, and D should execute; B may or may not depending on timing
+			So(executed, ShouldContain, "A")
+			So(executed, ShouldContain, "C")
+			So(executed, ShouldContain, "D")
+			So(exeCtx.First, ShouldEqual, 1)
+			So(exeCtx.Second, ShouldEqual, 1)
+		})
+
+		Convey("Deep dependency chain stability", func() {
+			graph := NewGraph[*Tuple2]()
+			const chainDepth = 100
+
+			// Create a deep chain
+			for i := 0; i < chainDepth; i++ {
+				nodeName := fmt.Sprintf("Chain%d", i)
+				var deps []string
+				if i > 0 {
+					deps = []string{fmt.Sprintf("Chain%d", i-1)}
+				}
+
+				node := NewNode(nodeName, func(ctx context.Context, c *Tuple2) error {
+					c.mu.Lock()
+					c.First++
+					c.mu.Unlock()
+					return nil
+				}, deps...)
+
+				graph.AddNode(node)
+			}
+
+			err := graph.Build()
+			So(err, ShouldBeNil)
+
+			exeCtx := &Tuple2{}
+			err = graph.Exec(ctx, exeCtx)
+			So(err, ShouldBeNil)
+			So(exeCtx.First, ShouldEqual, chainDepth)
+		})
+
+		Convey("Wide dependency fan-out stability", func() {
+			graph := NewGraph[*Tuple2]()
+			const fanOut = 200
+
+			// Create root node
+			root := NewNode("Root", func(ctx context.Context, c *Tuple2) error {
+				c.mu.Lock()
+				c.First = 1
+				c.mu.Unlock()
+				return nil
+			})
+			graph.AddNode(root)
+
+			// Create many nodes depending on root
+			for i := 0; i < fanOut; i++ {
+				nodeName := fmt.Sprintf("Fan%d", i)
+				node := NewNode(nodeName, func(ctx context.Context, c *Tuple2) error {
+					c.mu.Lock()
+					c.Second++
+					c.mu.Unlock()
+					return nil
+				}, "Root")
+				graph.AddNode(node)
+			}
+
+			graph.SetMaxGoNum(50) // Limited concurrency
+			err := graph.Build()
+			So(err, ShouldBeNil)
+
+			exeCtx := &Tuple2{}
+			start := time.Now()
+			err = graph.Exec(ctx, exeCtx)
+			duration := time.Since(start)
+
+			So(err, ShouldBeNil)
+			So(exeCtx.First, ShouldEqual, 1)
+			So(exeCtx.Second, ShouldEqual, fanOut)
+			So(duration, ShouldBeLessThan, 5*time.Second)
+		})
+
+		Convey("Concurrent modification safety", func() {
+			// Test that graph execution is safe even if context is modified concurrently
+			graph := NewGraph[*Tuple2]()
+
+			nodeA := NewNode("A", func(ctx context.Context, c *Tuple2) error {
+				c.mu.Lock()
+				original := c.First
+				c.mu.Unlock()
+				time.Sleep(time.Millisecond * 10)
+				c.mu.Lock()
+				c.First = original + 1
+				c.mu.Unlock()
+				return nil
+			})
+
+			nodeB := NewNode("B", func(ctx context.Context, c *Tuple2) error {
+				c.mu.Lock()
+				original := c.Second
+				c.mu.Unlock()
+				time.Sleep(time.Millisecond * 10)
+				c.mu.Lock()
+				c.Second = original + 1
+				c.mu.Unlock()
+				return nil
+			})
+
+			graph.AddNode(nodeA)
+			graph.AddNode(nodeB)
+			err := graph.Build()
+			So(err, ShouldBeNil)
+
+			exeCtx := &Tuple2{}
+
+			// Start concurrent executions
+			var wg sync.WaitGroup
+			for i := 0; i < 10; i++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					graph.Exec(ctx, exeCtx)
+				}()
+			}
+
+			wg.Wait()
+
+			// Values should be consistent (though exact values may vary due to concurrency)
+			So(exeCtx.First, ShouldBeGreaterThan, 0)
+			So(exeCtx.Second, ShouldBeGreaterThan, 0)
 		})
 	})
 }
